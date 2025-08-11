@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   rerank-service:
     build: .
@@ -7,15 +5,28 @@ services:
     ports:
       - "8888:8000"
     environment:
+      # Python 相关
       - PYTHONUNBUFFERED=1
-      - CUDA_VISIBLE_DEVICES=0  # 指定使用的GPU设备
-      - MODEL_PATH=/models/Qwen3-Reranker-4B  # 模型路径
-      - MODEL_SIZE=4B  # 模型大小
-      - GPU_MEMORY_UTILIZATION=0.5  # GPU内存使用率
-      - MAX_MODEL_LEN=32000  # 最大模型长度
+      - PYTHONPATH=/app
+      
+      # GPU 相关
+      - CUDA_VISIBLE_DEVICES=0
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      
+      # 模型配置
+      - MODEL_PATH=/models/Qwen3-Reranker-0.6B
+      - MODEL_SIZE=0.6B
+      - GPU_MEMORY_UTILIZATION=0.5
+      - MAX_MODEL_LEN=32000
+      
+      # 服务配置
+      - HOST=0.0.0.0
+      - PORT=8000
+      - LOG_LEVEL=INFO
+      - WORKERS=1
     volumes:
-      # 挂载本地模型目录（如果使用本地模型）
-      - ${LOCAL_MODEL_PATH:-/tmp/models}:/models
+      # 挂载本地模型目录
+      - /home/gsy/git_repo/Qwen-rerank-models/:/models/:ro
       # 挂载日志目录
       - ./logs:/app/logs
     deploy:
