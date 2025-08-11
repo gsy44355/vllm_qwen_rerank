@@ -4,6 +4,9 @@ vLLM Rerank 服务启动脚本
 """
 
 import os
+# 在导入其他模块之前设置 vLLM 环境变量
+os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+
 import sys
 import argparse
 import logging
