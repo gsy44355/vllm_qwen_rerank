@@ -1,7 +1,7 @@
 # Requires vllm>=0.8.5
 import logging
 import os
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 import json
 import math
 import uvicorn
@@ -30,7 +30,7 @@ class RerankRequest(BaseModel):
 
 class RerankResponse(BaseModel):
     scores: List[float]
-    ranked_documents: List[Dict[str, any]]
+    ranked_documents: List[Dict[str, Any]]
 
 class ModelConfig(BaseModel):
     model_path: str
