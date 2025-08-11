@@ -5,17 +5,15 @@ services:
     build: .
     container_name: vllm-rerank-service
     ports:
-      - "8000:8000"
+      - "8888:8000"
     environment:
       - PYTHONUNBUFFERED=1
       - CUDA_VISIBLE_DEVICES=0  # 指定使用的GPU设备
-      - MODEL_PATH=${MODEL_PATH:-Qwen/Qwen3-Reranker-4B}  # 模型路径
-      - MODEL_SIZE=${MODEL_SIZE:-4B}  # 模型大小
-      - GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}  # GPU内存使用率
-      - MAX_MODEL_LEN=${MAX_MODEL_LEN:-10000}  # 最大模型长度
+      - MODEL_PATH=/models/Qwen3-Reranker-4B  # 模型路径
+      - MODEL_SIZE=4B  # 模型大小
+      - GPU_MEMORY_UTILIZATION=0.5  # GPU内存使用率
+      - MAX_MODEL_LEN=32000  # 最大模型长度
     volumes:
-      # 挂载模型缓存目录，避免重复下载
-      - model_cache:/root/.cache/huggingface
       # 挂载本地模型目录（如果使用本地模型）
       - ${LOCAL_MODEL_PATH:-/tmp/models}:/models
       # 挂载日志目录
@@ -34,7 +32,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
-
-volumes:
-  model_cache:
-    driver: local
