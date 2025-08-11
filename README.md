@@ -77,16 +77,16 @@ GPU_MEMORY_UTILIZATION=0.6 ./docker-deploy.sh deploy
 
 ```bash
 # 构建并启动（使用默认配置）
-docker-compose up -d
+docker compose up -d
 
 # 使用环境变量配置
-MODEL_PATH=/models/qwen-rerank-4b MODEL_SIZE=4B docker-compose up -d
+docker compose up -d
 
 # 查看日志
-docker-compose logs -f
+docker compose logs -f
 
 # 停止服务
-docker-compose down
+docker compose down
 ```
 
 服务将在 `http://localhost:8000` 启动。
