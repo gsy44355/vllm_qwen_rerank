@@ -34,13 +34,18 @@ async def test_async_engine():
         
         # 测试异步生成
         test_prompt = "Hello, how are you?"
-        sampling_params = {
-            "temperature": 0,
-            "max_tokens": 10,
-        }
+        from vllm import SamplingParams
+        sampling_params = SamplingParams(
+            temperature=0,
+            max_tokens=10,
+        )
         
         print("测试异步生成...")
-        async for output in engine.generate(test_prompt, sampling_params):
+        async for output in engine.generate(
+            prompt=test_prompt,
+            sampling_params=sampling_params,
+            request_id="test_1"
+        ):
             print(f"✅ 异步生成成功: {output.outputs[0].text}")
             break
         

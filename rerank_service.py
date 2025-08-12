@@ -10,12 +10,13 @@ from pydantic import BaseModel
 import torch
 from transformers import AutoTokenizer
 from vllm.engine.async_llm_engine import AsyncLLMEngine, AsyncEngineArgs
+from vllm import SamplingParams
 from vllm.inputs.data import TokensPrompt
 import asyncio
 from contextlib import asynccontextmanager
 import uuid
 import traceback
-# 配置日志
+# 配置日志  
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,12 @@ async def compute_logits_async(engine, messages, sampling_params, true_token, fa
         scores = []
         # 使用异步引擎处理每个消息
         for message in messages:
-            # 使用异步生成
-            async for output in engine.generate(message, sampling_params, request_id=str(uuid.uuid4())):
+            # 使用异步生成，传递正确的参数
+            async for output in engine.generate(
+                prompt=message,
+                sampling_params=sampling_params,
+                request_id=f"rerank_{str(uuid.uuid4())}"
+            ):
                 final_logits = output.outputs[0].logprobs[-1]
                 if true_token not in final_logits:
                     true_logit = -10
@@ -135,12 +140,12 @@ async def initialize_model(config: ModelConfig = None):
     false_token = tokenizer("no", add_special_tokens=False).input_ids[0]
     
     # 设置采样参数
-    sampling_params = {
-        "temperature": 0,
-        "max_tokens": 1,
-        "logprobs": 20,
-        "allowed_token_ids": [true_token, false_token],
-    }
+    sampling_params = SamplingParams(
+        temperature=0,
+        max_tokens=1,
+        logprobs=20,
+        allowed_token_ids=[true_token, false_token],
+    )
     
     logger.info("模型初始化完成")
 
