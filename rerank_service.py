@@ -136,65 +136,35 @@ def generate_stable_request_id_from_tokens(tokens: List[int]) -> str:
     return f"rerank_{hashlib.md5(content.encode()).hexdigest()[:16]}"
 
 async def compute_logits_batch(engine, messages, sampling_params, true_token, false_token):
-    """真正的批处理版本：一次性提交所有 prompts，并基于 tokens 生成稳定 request_id。
-
-    返回顺序与输入 messages 对齐。
-    """
+    """并发提交多条请求：每条使用 prompt 与 request_id；由引擎内部自动做批处理。"""
     try:
-        # 基于 tokens 构造稳定 request_id，保证相同输入可命中KV缓存
-        request_ids: List[str] = []
-        for msg in messages:
-            # TokensPrompt(prompt_token_ids=...)
+        async def compute_one(msg) -> float:
+            # 生成稳定 request_id（基于 tokens）
             token_ids = getattr(msg, "prompt_token_ids", None)
             if token_ids is None:
-                # 兜底：无法获取 tokens 时，用字符串表示
-                content_str = str(msg)
-                rid = f"rerank_{hashlib.md5(content_str.encode()).hexdigest()[:16]}"
+                rid = f"rerank_{hashlib.md5(str(msg).encode()).hexdigest()[:16]}"
             else:
                 rid = generate_stable_request_id_from_tokens(token_ids)
-            request_ids.append(rid)
 
-        id_to_index = {rid: idx for idx, rid in enumerate(request_ids)}
-        scores: List[Optional[float]] = [None] * len(messages)
+            async for output in engine.generate(
+                prompt=msg,
+                sampling_params=sampling_params,
+                request_id=rid,
+            ):
+                final_logits = output.outputs[0].logprobs[-1]
 
-        # 一次性批量生成
-        async for outputs in engine.generate(
-            prompt=messages,
-            sampling_params=sampling_params,
-            request_ids=request_ids,
-        ):
-            # 兼容返回单个或列表
-            batch_outputs = outputs if isinstance(outputs, list) else [outputs]
-            for output in batch_outputs:
-                try:
-                    rid = getattr(output, "request_id", None)
-                    idx = id_to_index.get(rid, None)
-                    final_logits = output.outputs[0].logprobs[-1]
+                true_logit = float(final_logits[true_token].logprob) if true_token in final_logits else -10.0
+                false_logit = float(final_logits[false_token].logprob) if false_token in final_logits else -10.0
 
-                    if true_token in final_logits:
-                        true_logit = final_logits[true_token].logprob
-                    else:
-                        true_logit = -10.0
+                logits_tensor = torch.tensor([false_logit, true_logit], dtype=torch.float32)
+                log_softmax_scores = torch.nn.functional.log_softmax(logits_tensor, dim=0)
+                return log_softmax_scores[1].exp().item()
 
-                    if false_token in final_logits:
-                        false_logit = final_logits[false_token].logprob
-                    else:
-                        false_logit = -10.0
+            return 0.0
 
-                    true_logit = float(true_logit)
-                    false_logit = float(false_logit)
-
-                    logits_tensor = torch.tensor([false_logit, true_logit], dtype=torch.float32)
-                    log_softmax_scores = torch.nn.functional.log_softmax(logits_tensor, dim=0)
-                    score = log_softmax_scores[1].exp().item()
-
-                    if idx is not None:
-                        scores[idx] = score
-                except Exception as inner_e:
-                    logger.error(f"处理批量输出时出错: {inner_e}")
-
-        # 回填任何未赋值项（极端情况下）
-        return [s if s is not None else 0.0 for s in scores]
+        tasks = [asyncio.create_task(compute_one(msg)) for msg in messages]
+        scores: List[float] = await asyncio.gather(*tasks)
+        return scores
 
     except Exception as e:
         logger.error(f"计算 logits 时出错: {e}")
