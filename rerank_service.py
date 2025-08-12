@@ -192,12 +192,7 @@ async def initialize_model(config: ModelConfig = None):
         tensor_parallel_size=1,  # 单GPU
         max_num_batched_tokens=config.max_num_batched_tokens,  # 批处理优化
         max_num_seqs=256,  # 增加并发序列数
-        max_paddings=256,  # 增加padding数量
         quantization=None,  # 不使用量化，保持精度
-        enforce_eager=False,  # 启用CUDA图优化
-        max_lora_rank=0,  # 不使用LoRA
-        max_loras=0,  # 不使用LoRA
-        max_cpu_loras=0,  # 不使用LoRA
     )
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     
