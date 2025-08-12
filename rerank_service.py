@@ -13,7 +13,7 @@ from vllm.engine.async_llm_engine import AsyncLLMEngine, AsyncEngineArgs
 from vllm.inputs.data import TokensPrompt
 import asyncio
 from contextlib import asynccontextmanager
-
+import uuid
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
