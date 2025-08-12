@@ -71,18 +71,17 @@ def process_inputs(pairs, instruction, max_length, suffix_tokens):
     return messages
 
 async def compute_logits_batch(engine, messages, sampling_params, true_token, false_token):
-    """优化的批处理版本 - 一次性处理所有消息"""
+    """优化的批处理版本 - 使用并发处理多个消息"""
     try:
         scores = []
-        request_ids = [f"rerank_{str(uuid.uuid4())}" for _ in messages]
         
-        # 批量生成
-        async for outputs in engine.generate(
-            prompts=messages,
-            sampling_params=sampling_params,
-            request_ids=request_ids
-        ):
-            for output in outputs:
+        # 创建并发任务
+        async def process_single_message(message):
+            async for output in engine.generate(
+                prompt=message,
+                sampling_params=sampling_params,
+                request_id=f"rerank_{str(uuid.uuid4())}"
+            ):
                 final_logits = output.outputs[0].logprobs[-1]
                 
                 # 正确提取 logprob 值
@@ -105,7 +104,11 @@ async def compute_logits_batch(engine, messages, sampling_params, true_token, fa
                 log_softmax_scores = torch.nn.functional.log_softmax(logits_tensor, dim=0)
                 score = log_softmax_scores[1].exp().item()  # true 的概率
                 
-                scores.append(score)
+                return score
+        
+        # 并发处理所有消息
+        tasks = [process_single_message(message) for message in messages]
+        scores = await asyncio.gather(*tasks)
         
         return scores
         
@@ -192,7 +195,6 @@ async def initialize_model(config: ModelConfig = None):
         tensor_parallel_size=1,  # 单GPU
         max_num_batched_tokens=config.max_num_batched_tokens,  # 批处理优化
         max_num_seqs=256,  # 增加并发序列数
-        quantization=None,  # 不使用量化，保持精度
     )
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     
