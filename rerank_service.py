@@ -65,7 +65,7 @@ def process_inputs(pairs, instruction, max_length, suffix_tokens):
     return messages
 
 async def compute_logits_async(engine, messages, sampling_params, true_token, false_token):
-    """改进的分数计算"""
+    """修正版本 - 正确处理 Logprob 对象"""
     try:
         scores = []
         
@@ -77,9 +77,20 @@ async def compute_logits_async(engine, messages, sampling_params, true_token, fa
             ):
                 final_logits = output.outputs[0].logprobs[-1]
                 
-                # 获取 logits
-                true_logit = final_logits.get(true_token, -10)
-                false_logit = final_logits.get(false_token, -10)
+                # 正确提取 logprob 值
+                if true_token in final_logits:
+                    true_logit = final_logits[true_token].logprob  # 注意这里的 .logprob
+                else:
+                    true_logit = -10.0
+                    
+                if false_token in final_logits:
+                    false_logit = final_logits[false_token].logprob  # 注意这里的 .logprob
+                else:
+                    false_logit = -10.0
+                
+                # 确保是 float 类型
+                true_logit = float(true_logit)
+                false_logit = float(false_logit)
                 
                 # 使用与官方一致的计算方式
                 logits_tensor = torch.tensor([false_logit, true_logit], dtype=torch.float32)
