@@ -69,7 +69,7 @@ async def compute_logits_async(engine, messages, sampling_params, true_token, fa
         # 使用异步引擎处理每个消息
         for message in messages:
             # 使用异步生成
-            async for output in engine.generate(message, sampling_params):
+            async for output in engine.generate(message, sampling_params, request_id=str(uuid.uuid4())):
                 final_logits = output.outputs[0].logprobs[-1]
                 if true_token not in final_logits:
                     true_logit = -10
