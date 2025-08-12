@@ -9,17 +9,14 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import torch
 from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
+from vllm import AsyncLLM, SamplingParams
 from vllm.inputs.data import TokensPrompt
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# FastAPI应用
-app = FastAPI(title="Rerank Service", description="基于vLLM的文档重排序服务")
 
 # 请求和响应模型
 class RerankRequest(BaseModel):
@@ -46,8 +43,6 @@ true_token = None
 false_token = None
 sampling_params = None
 model_config = None
-# 线程池执行器，用于处理同步的model.generate调用
-executor = ThreadPoolExecutor(max_workers=4)
 
 def format_instruction(instruction, query, doc):
     """格式化指令"""
@@ -67,39 +62,34 @@ def process_inputs(pairs, instruction, max_length, suffix_tokens):
     messages = [TokensPrompt(prompt_token_ids=ele) for ele in messages]
     return messages
 
-async def compute_logits(model, messages, sampling_params, true_token, false_token):
-    """计算logits并返回分数"""
-    # 使用线程池执行同步的model.generate，避免阻塞事件循环
-    import asyncio
-    from concurrent.futures import ThreadPoolExecutor
-    
-    def _generate_sync():
-        return model.generate(messages, sampling_params, use_tqdm=False)
-    
-    # 在线程池中执行同步调用
-    loop = asyncio.get_event_loop()
-    with ThreadPoolExecutor() as executor:
-        outputs = await loop.run_in_executor(executor, _generate_sync)
-    
-    scores = []
-    for i in range(len(outputs)):
-        final_logits = outputs[i].outputs[0].logprobs[-1]
-        if true_token not in final_logits:
-            true_logit = -10
-        else:
-            true_logit = final_logits[true_token].logprob
-        if false_token not in final_logits:
-            false_logit = -10
-        else:
-            false_logit = final_logits[false_token].logprob
-        true_score = math.exp(true_logit)
-        false_score = math.exp(false_logit)
-        score = true_score / (true_score + false_score)
-        scores.append(score)
-    return scores
+async def compute_logits_async(model, messages, sampling_params, true_token, false_token):
+    """使用 vLLM 异步 API 计算 logits"""
+    try:
+        # 使用 vLLM 的异步 generate 方法
+        outputs = await model.generate(messages, sampling_params, use_tqdm=False)
+        
+        scores = []
+        for i in range(len(outputs)):
+            final_logits = outputs[i].outputs[0].logprobs[-1]
+            if true_token not in final_logits:
+                true_logit = -10
+            else:
+                true_logit = final_logits[true_token].logprob
+            if false_token not in final_logits:
+                false_logit = -10
+            else:
+                false_logit = final_logits[false_token].logprob
+            true_score = math.exp(true_logit)
+            false_score = math.exp(false_logit)
+            score = true_score / (true_score + false_score)
+            scores.append(score)
+        return scores
+    except Exception as e:
+        logger.error(f"计算 logits 时出错: {e}")
+        raise
 
-def initialize_model(config: ModelConfig = None):
-    """初始化模型和tokenizer"""
+async def initialize_model(config: ModelConfig = None):
+    """异步初始化模型和tokenizer"""
     global tokenizer, model, suffix_tokens, true_token, false_token, sampling_params, model_config
     
     # 使用默认配置或传入的配置
@@ -123,8 +113,8 @@ def initialize_model(config: ModelConfig = None):
     tokenizer.padding_side = "left"
     tokenizer.pad_token = tokenizer.eos_token
     
-    # 初始化模型（删除GPU并行处理逻辑）
-    model = LLM(
+    # 初始化异步 vLLM 模型
+    model = AsyncLLM(
         model=config.model_path, 
         tensor_parallel_size=1,  # 设置为1，不使用GPU并行
         max_model_len=config.max_model_len, 
@@ -150,10 +140,11 @@ def initialize_model(config: ModelConfig = None):
     
     logger.info("模型初始化完成")
 
-@app.on_event("startup")
-async def startup_event():
-    """应用启动时初始化模型"""
-    # 从环境变量读取配置
+# 应用生命周期管理
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    # 启动时初始化
     model_path = os.getenv('MODEL_PATH', 'Qwen/Qwen3-Reranker-4B')
     model_size = os.getenv('MODEL_SIZE', '4B')
     gpu_memory_utilization = float(os.getenv('GPU_MEMORY_UTILIZATION', '0.8'))
@@ -166,19 +157,27 @@ async def startup_event():
         max_model_len=max_model_len
     )
     
-    initialize_model(config)
+    await initialize_model(config)
+    logger.info("服务启动完成")
+    
+    yield
+    
+    # 关闭时清理
+    if model:
+        await model.close()
+    logger.info("服务关闭完成")
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """应用关闭时清理资源"""
-    global executor
-    executor.shutdown(wait=True)
-    logger.info("线程池已关闭")
+# FastAPI应用
+app = FastAPI(
+    title="Rerank Service (vLLM Async)", 
+    description="基于 vLLM 异步 API 的文档重排序服务",
+    lifespan=lifespan
+)
 
 @app.get("/")
 async def root():
     """根路径"""
-    return {"message": "Rerank Service is running"}
+    return {"message": "Rerank Service is running (vLLM Async)"}
 
 @app.get("/health")
 async def health_check():
@@ -212,8 +211,8 @@ async def rerank_documents(request: RerankRequest):
             suffix_tokens
         )
         
-        # 计算分数
-        scores = await compute_logits(model, inputs, sampling_params, true_token, false_token)
+        # 使用 vLLM 异步 API 计算分数
+        scores = await compute_logits_async(model, inputs, sampling_params, true_token, false_token)
         
         # 创建排序后的文档列表
         ranked_docs = [
@@ -229,13 +228,22 @@ async def rerank_documents(request: RerankRequest):
 
 @app.post("/batch_rerank")
 async def batch_rerank(batch_requests: List[RerankRequest]):
-    """批量重排序"""
+    """批量重排序 - 使用并发处理"""
     try:
-        results = []
-        for request in batch_requests:
-            result = await rerank_documents(request)
-            results.append(result)
-        return {"results": results}
+        # 并发处理所有请求
+        tasks = [rerank_documents(request) for request in batch_requests]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 处理结果
+        processed_results = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"批量处理第 {i+1} 个请求时出错: {result}")
+                processed_results.append({"error": str(result)})
+            else:
+                processed_results.append(result)
+        
+        return {"results": processed_results}
     except Exception as e:
         logger.error(f"批量重排序过程中发生错误: {str(e)}")
         raise HTTPException(status_code=500, detail=f"内部服务器错误: {str(e)}")
@@ -245,7 +253,13 @@ async def reload_model(config: ModelConfig):
     """重新加载模型"""
     try:
         logger.info("开始重新加载模型...")
-        initialize_model(config)
+        
+        # 关闭旧模型
+        if model:
+            await model.close()
+        
+        # 初始化新模型
+        await initialize_model(config)
         logger.info("模型重新加载完成")
         return {"message": "模型重新加载成功", "config": config.dict()}
     except Exception as e:
