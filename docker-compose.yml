@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   rerank-service:
     build: .
@@ -6,36 +8,32 @@ services:
       - "8888:8000"
     environment:
       # Python 相关
-      - PYTHONUNBUFFERED=1
-      - PYTHONPATH=/app
+      PYTHONUNBUFFERED: 1
+      PYTHONPATH: /app
       
       # GPU 相关
-      - CUDA_VISIBLE_DEVICES=0
-      - VLLM_WORKER_MULTIPROC_METHOD=spawn
+      CUDA_VISIBLE_DEVICES: 0
+      VLLM_WORKER_MULTIPROC_METHOD: spawn
       
-      # 模型配置
-      - MODEL_PATH=/models/Qwen3-Reranker-0.6B
-      - MODEL_SIZE=0.6B
-      - GPU_MEMORY_UTILIZATION=0.5
-      - MAX_MODEL_LEN=32000
+      # 模型配置（可覆盖 Dockerfile 默认值）
+      MODEL_PATH: /models/Qwen3-Reranker-0.6B
+      MODEL_SIZE: 0.6B
+      GPU_MEMORY_UTILIZATION: 0.5
+      MAX_MODEL_LEN: 32000
       
       # 服务配置
-      - HOST=0.0.0.0
-      - PORT=8000
-      - LOG_LEVEL=INFO
-      - WORKERS=1
+      HOST: 0.0.0.0
+      PORT: 8000
+      LOG_LEVEL: INFO
+      WORKERS: 1
     volumes:
-      # 挂载本地模型目录
       - /home/gsy/git_repo/Qwen-rerank-models/:/models/:ro
-      # 挂载日志目录
       - ./logs:/app/logs
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    deploy: {}  # 防止某些版本报错
+    device_requests:  # 本地 GPU 配置
+      - driver: nvidia
+        count: 1
+        capabilities: [gpu]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
