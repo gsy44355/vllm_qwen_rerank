@@ -4,6 +4,7 @@ services:
   rerank-service:
     build: .
     container_name: vllm-rerank-service
+    runtime: nvidia
     ports:
       - "8888:8000"
     environment:
@@ -13,6 +14,7 @@ services:
       
       # GPU 相关
       CUDA_VISIBLE_DEVICES: 0
+      NVIDIA_VISIBLE_DEVICES: 0
       VLLM_WORKER_MULTIPROC_METHOD: spawn
       
       # 模型配置（可覆盖 Dockerfile 默认值）
@@ -30,10 +32,6 @@ services:
       - /home/gsy/git_repo/Qwen-rerank-models/:/models/:ro
       - ./logs:/app/logs
     deploy: {}  # 防止某些版本报错
-    device_requests:  # 本地 GPU 配置
-      - driver: nvidia
-        count: 1
-        capabilities: [gpu]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
