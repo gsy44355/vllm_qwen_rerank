@@ -16,6 +16,10 @@ import asyncio
 from contextlib import asynccontextmanager
 import uuid
 import traceback
+import gc
+from concurrent.futures import ThreadPoolExecutor
+import time
+
 # 配置日志  
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,8 +38,9 @@ class RerankResponse(BaseModel):
 class ModelConfig(BaseModel):
     model_path: str
     model_size: str = "4B"  # 0.6B, 4B, 8B
-    gpu_memory_utilization: float = 0.8
+    gpu_memory_utilization: float = 0.85  # 提高显存利用率
     max_model_len: int = 10000
+    max_num_batched_tokens: int = 8192  # 批处理token数量限制
 
 # 全局变量
 tokenizer = None
@@ -45,6 +50,7 @@ true_token = None
 false_token = None
 sampling_params = None
 model_config = None
+executor = None
 
 def format_instruction(instruction, query, doc):
     """格式化指令"""
@@ -55,7 +61,7 @@ def format_instruction(instruction, query, doc):
     return text
 
 def process_inputs(pairs, instruction, max_length, suffix_tokens):
-    """处理输入数据"""
+    """处理输入数据 - 优化版本"""
     messages = [format_instruction(instruction, query, doc) for query, doc in pairs]
     messages = tokenizer.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=False, enable_thinking=False
@@ -64,8 +70,51 @@ def process_inputs(pairs, instruction, max_length, suffix_tokens):
     messages = [TokensPrompt(prompt_token_ids=ele) for ele in messages]
     return messages
 
+async def compute_logits_batch(engine, messages, sampling_params, true_token, false_token):
+    """优化的批处理版本 - 一次性处理所有消息"""
+    try:
+        scores = []
+        request_ids = [f"rerank_{str(uuid.uuid4())}" for _ in messages]
+        
+        # 批量生成
+        async for outputs in engine.generate(
+            prompts=messages,
+            sampling_params=sampling_params,
+            request_ids=request_ids
+        ):
+            for output in outputs:
+                final_logits = output.outputs[0].logprobs[-1]
+                
+                # 正确提取 logprob 值
+                if true_token in final_logits:
+                    true_logit = final_logits[true_token].logprob
+                else:
+                    true_logit = -10.0
+                    
+                if false_token in final_logits:
+                    false_logit = final_logits[false_token].logprob
+                else:
+                    false_logit = -10.0
+                
+                # 确保是 float 类型
+                true_logit = float(true_logit)
+                false_logit = float(false_logit)
+                
+                # 使用与官方一致的计算方式
+                logits_tensor = torch.tensor([false_logit, true_logit], dtype=torch.float32)
+                log_softmax_scores = torch.nn.functional.log_softmax(logits_tensor, dim=0)
+                score = log_softmax_scores[1].exp().item()  # true 的概率
+                
+                scores.append(score)
+        
+        return scores
+        
+    except Exception as e:
+        logger.error(f"计算 logits 时出错: {e}")
+        raise
+
 async def compute_logits_async(engine, messages, sampling_params, true_token, false_token):
-    """修正版本 - 正确处理 Logprob 对象"""
+    """单条处理版本 - 用于小批量或单个请求"""
     try:
         scores = []
         
@@ -79,12 +128,12 @@ async def compute_logits_async(engine, messages, sampling_params, true_token, fa
                 
                 # 正确提取 logprob 值
                 if true_token in final_logits:
-                    true_logit = final_logits[true_token].logprob  # 注意这里的 .logprob
+                    true_logit = final_logits[true_token].logprob
                 else:
                     true_logit = -10.0
                     
                 if false_token in final_logits:
-                    false_logit = final_logits[false_token].logprob  # 注意这里的 .logprob
+                    false_logit = final_logits[false_token].logprob
                 else:
                     false_logit = -10.0
                 
@@ -107,16 +156,17 @@ async def compute_logits_async(engine, messages, sampling_params, true_token, fa
         raise
 
 async def initialize_model(config: ModelConfig = None):
-    """异步初始化模型和tokenizer"""
-    global tokenizer, engine, suffix_tokens, true_token, false_token, sampling_params, model_config
+    """异步初始化模型和tokenizer - 优化版本"""
+    global tokenizer, engine, suffix_tokens, true_token, false_token, sampling_params, model_config, executor
     
     # 使用默认配置或传入的配置
     if config is None:
         config = ModelConfig(
             model_path='Qwen/Qwen3-Reranker-4B',
             model_size='4B',
-            gpu_memory_utilization=0.8,
-            max_model_len=10000
+            gpu_memory_utilization=0.85,  # 提高显存利用率
+            max_model_len=10000,
+            max_num_batched_tokens=8192
         )
     
     model_config = config
@@ -125,20 +175,29 @@ async def initialize_model(config: ModelConfig = None):
     logger.info(f"模型大小: {config.model_size}")
     logger.info(f"GPU内存使用率: {config.gpu_memory_utilization}")
     logger.info(f"最大模型长度: {config.max_model_len}")
+    logger.info(f"批处理token数量限制: {config.max_num_batched_tokens}")
     
     # 初始化tokenizer
     tokenizer = AutoTokenizer.from_pretrained(config.model_path)
     tokenizer.padding_side = "left"
     tokenizer.pad_token = tokenizer.eos_token
     
-    # 初始化 vLLM 异步引擎
+    # 初始化 vLLM 异步引擎 - 优化配置
     engine_args = AsyncEngineArgs(
         model=config.model_path,
         max_model_len=config.max_model_len,
         enable_prefix_caching=True,
         gpu_memory_utilization=config.gpu_memory_utilization,
         trust_remote_code=True,
-        tensor_parallel_size=1,  # 设置为1，不使用GPU并行
+        tensor_parallel_size=1,  # 单GPU
+        max_num_batched_tokens=config.max_num_batched_tokens,  # 批处理优化
+        max_num_seqs=256,  # 增加并发序列数
+        max_paddings=256,  # 增加padding数量
+        quantization=None,  # 不使用量化，保持精度
+        enforce_eager=False,  # 启用CUDA图优化
+        max_lora_rank=0,  # 不使用LoRA
+        max_loras=0,  # 不使用LoRA
+        max_cpu_loras=0,  # 不使用LoRA
     )
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     
@@ -158,6 +217,9 @@ async def initialize_model(config: ModelConfig = None):
         allowed_token_ids=[true_token, false_token],
     )
     
+    # 初始化线程池执行器
+    executor = ThreadPoolExecutor(max_workers=4)
+    
     logger.info("模型初始化完成")
 
 # 应用生命周期管理
@@ -167,14 +229,16 @@ async def lifespan(app: FastAPI):
     # 启动时初始化
     model_path = os.getenv('MODEL_PATH', 'Qwen/Qwen3-Reranker-4B')
     model_size = os.getenv('MODEL_SIZE', '4B')
-    gpu_memory_utilization = float(os.getenv('GPU_MEMORY_UTILIZATION', '0.8'))
+    gpu_memory_utilization = float(os.getenv('GPU_MEMORY_UTILIZATION', '0.85'))
     max_model_len = int(os.getenv('MAX_MODEL_LEN', '10000'))
+    max_num_batched_tokens = int(os.getenv('MAX_NUM_BATCHED_TOKENS', '8192'))
     
     config = ModelConfig(
         model_path=model_path,
         model_size=model_size,
         gpu_memory_utilization=gpu_memory_utilization,
-        max_model_len=max_model_len
+        max_model_len=max_model_len,
+        max_num_batched_tokens=max_num_batched_tokens
     )
     
     await initialize_model(config)
@@ -185,19 +249,25 @@ async def lifespan(app: FastAPI):
     # 关闭时清理
     if engine:
         await engine.close()
+    if executor:
+        executor.shutdown(wait=True)
+    # 清理GPU缓存
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
     logger.info("服务关闭完成")
 
 # FastAPI应用
 app = FastAPI(
-    title="Rerank Service (Compatible)", 
-    description="兼容 vLLM 0.10.0+ 的文档重排序服务",
+    title="Rerank Service (Optimized)", 
+    description="优化的单GPU文档重排序服务",
     lifespan=lifespan
 )
 
 @app.get("/")
 async def root():
     """根路径"""
-    return {"message": "Rerank Service is running (Compatible)"}
+    return {"message": "Rerank Service is running (Optimized)"}
 
 @app.get("/health")
 async def health_check():
@@ -209,13 +279,14 @@ async def health_check():
             "model_path": model_config.model_path if model_config else None,
             "model_size": model_config.model_size if model_config else None,
             "gpu_memory_utilization": model_config.gpu_memory_utilization if model_config else None,
-            "max_model_len": model_config.max_model_len if model_config else None
+            "max_model_len": model_config.max_model_len if model_config else None,
+            "max_num_batched_tokens": model_config.max_num_batched_tokens if model_config else None
         } if model_config else None
     }
 
 @app.post("/rerank", response_model=RerankResponse)
 async def rerank_documents(request: RerankRequest):
-    """重排序文档"""
+    """重排序文档 - 优化版本"""
     try:
         if not request.documents:
             raise HTTPException(status_code=400, detail="文档列表不能为空")
@@ -231,8 +302,11 @@ async def rerank_documents(request: RerankRequest):
             suffix_tokens
         )
         
-        # 使用异步引擎执行 vLLM 调用
-        scores = await compute_logits_async(engine, inputs, sampling_params, true_token, false_token)
+        # 根据文档数量选择处理方式
+        if len(inputs) > 10:  # 大批量使用批处理
+            scores = await compute_logits_batch(engine, inputs, sampling_params, true_token, false_token)
+        else:  # 小批量使用单条处理
+            scores = await compute_logits_async(engine, inputs, sampling_params, true_token, false_token)
         
         # 创建排序后的文档列表
         ranked_docs = [
@@ -248,35 +322,89 @@ async def rerank_documents(request: RerankRequest):
 
 @app.post("/batch_rerank")
 async def batch_rerank(batch_requests: List[RerankRequest]):
-    """批量重排序 - 使用并发处理"""
+    """批量重排序 - 优化版本，使用真正的批处理"""
     try:
-        # 并发处理所有请求
-        tasks = [rerank_documents(request) for request in batch_requests]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        if not batch_requests:
+            raise HTTPException(status_code=400, detail="批量请求不能为空")
         
-        # 处理结果
-        processed_results = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error(f"批量处理第 {i+1} 个请求时出错: {result}")
-                processed_results.append({"error": str(result)})
-            else:
-                processed_results.append(result)
+        # 合并所有请求的文档
+        all_pairs = []
+        all_documents = []
+        all_queries = []
+        all_instructions = []
         
-        return {"results": processed_results}
+        for request in batch_requests:
+            if not request.documents:
+                continue
+            pairs = [(request.query, doc) for doc in request.documents]
+            all_pairs.extend(pairs)
+            all_documents.extend(request.documents)
+            all_queries.extend([request.query] * len(request.documents))
+            all_instructions.extend([request.instruction] * len(request.documents))
+        
+        if not all_pairs:
+            raise HTTPException(status_code=400, detail="没有有效的文档")
+        
+        # 使用第一个请求的max_length作为统一长度
+        max_length = batch_requests[0].max_length
+        
+        # 处理输入 - 批量处理
+        inputs = process_inputs(
+            all_pairs, 
+            all_instructions[0],  # 使用第一个指令
+            max_length - len(suffix_tokens), 
+            suffix_tokens
+        )
+        
+        # 批量计算scores
+        scores = await compute_logits_batch(engine, inputs, sampling_params, true_token, false_token)
+        
+        # 按原始请求分组结果
+        results = []
+        start_idx = 0
+        for request in batch_requests:
+            if not request.documents:
+                results.append({"scores": [], "ranked_documents": []})
+                continue
+                
+            end_idx = start_idx + len(request.documents)
+            request_scores = scores[start_idx:end_idx]
+            
+            # 创建排序后的文档列表
+            ranked_docs = [
+                {"document": doc, "score": score, "rank": i + 1}
+                for i, (doc, score) in enumerate(sorted(zip(request.documents, request_scores), key=lambda x: x[1], reverse=True))
+            ]
+            
+            results.append({
+                "scores": request_scores,
+                "ranked_documents": ranked_docs
+            })
+            
+            start_idx = end_idx
+        
+        return {"results": results}
+        
     except Exception as e:
         logger.error(f"批量重排序过程中发生错误: {str(e)}")
         raise HTTPException(status_code=500, detail=f"内部服务器错误: {str(e)}")
 
 @app.post("/reload_model")
 async def reload_model(config: ModelConfig):
-    """重新加载模型"""
+    """重新加载模型 - 优化版本"""
     try:
         logger.info("开始重新加载模型...")
         
-        # 关闭旧引擎
+        # 关闭旧引擎和线程池
         if engine:
             await engine.close()
+        if executor:
+            executor.shutdown(wait=True)
+        
+        # 清理GPU缓存
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
         
         # 初始化新模型
         await initialize_model(config)
@@ -285,6 +413,18 @@ async def reload_model(config: ModelConfig):
     except Exception as e:
         logger.error(f"重新加载模型时发生错误: {str(e)}")
         raise HTTPException(status_code=500, detail=f"重新加载模型失败: {str(e)}")
+
+@app.post("/clear_cache")
+async def clear_cache():
+    """清理GPU缓存"""
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+        return {"message": "GPU缓存清理完成"}
+    except Exception as e:
+        logger.error(f"清理缓存时发生错误: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"清理缓存失败: {str(e)}")
 
 if __name__ == "__main__":
     # 启动服务
