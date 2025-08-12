@@ -203,7 +203,6 @@ async def initialize_model(config: ModelConfig = None):
         max_num_batched_tokens=config.max_num_batched_tokens,  # 批处理优化
         max_num_seqs=256,  # 增加并发序列数
         enable_chunked_prefill=True,  # 启用分块预填充
-        max_num_blocks_per_seq=256,  # 每个序列的最大block数
     )
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     
