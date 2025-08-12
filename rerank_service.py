@@ -1,4 +1,4 @@
-# Requires vllm>=0.8.5
+# Requires vllm>=0.10.0
 import logging
 import os
 from typing import Dict, Optional, List, Any
@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import torch
 from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
+from vllm.engine.async_llm_engine import AsyncLLMEngine, AsyncEngineArgs
 from vllm.inputs.data import TokensPrompt
 import asyncio
 from contextlib import asynccontextmanager
@@ -37,7 +37,7 @@ class ModelConfig(BaseModel):
 
 # 全局变量
 tokenizer = None
-model = None
+engine = None
 suffix_tokens = None
 true_token = None
 false_token = None
@@ -62,27 +62,28 @@ def process_inputs(pairs, instruction, max_length, suffix_tokens):
     messages = [TokensPrompt(prompt_token_ids=ele) for ele in messages]
     return messages
 
-async def compute_logits_async(model, messages, sampling_params, true_token, false_token):
-    """使用 vLLM 异步 API 计算 logits"""
+async def compute_logits_async(engine, messages, sampling_params, true_token, false_token):
+    """使用 vLLM 异步引擎计算 logits"""
     try:
-        # 使用 vLLM 的异步 generate 方法（vLLM 0.10.0+）
-        outputs = await model.generate_async(messages, sampling_params, use_tqdm=False)
-        
         scores = []
-        for i in range(len(outputs)):
-            final_logits = outputs[i].outputs[0].logprobs[-1]
-            if true_token not in final_logits:
-                true_logit = -10
-            else:
-                true_logit = final_logits[true_token].logprob
-            if false_token not in final_logits:
-                false_logit = -10
-            else:
-                false_logit = final_logits[false_token].logprob
-            true_score = math.exp(true_logit)
-            false_score = math.exp(false_logit)
-            score = true_score / (true_score + false_score)
-            scores.append(score)
+        # 使用异步引擎处理每个消息
+        for message in messages:
+            # 使用异步生成
+            async for output in engine.generate(message, sampling_params):
+                final_logits = output.outputs[0].logprobs[-1]
+                if true_token not in final_logits:
+                    true_logit = -10
+                else:
+                    true_logit = final_logits[true_token].logprob
+                if false_token not in final_logits:
+                    false_logit = -10
+                else:
+                    false_logit = final_logits[false_token].logprob
+                true_score = math.exp(true_logit)
+                false_score = math.exp(false_logit)
+                score = true_score / (true_score + false_score)
+                scores.append(score)
+                break  # 只取第一个输出
         return scores
     except Exception as e:
         logger.error(f"计算 logits 时出错: {e}")
@@ -90,7 +91,7 @@ async def compute_logits_async(model, messages, sampling_params, true_token, fal
 
 async def initialize_model(config: ModelConfig = None):
     """异步初始化模型和tokenizer"""
-    global tokenizer, model, suffix_tokens, true_token, false_token, sampling_params, model_config
+    global tokenizer, engine, suffix_tokens, true_token, false_token, sampling_params, model_config
     
     # 使用默认配置或传入的配置
     if config is None:
@@ -113,14 +114,16 @@ async def initialize_model(config: ModelConfig = None):
     tokenizer.padding_side = "left"
     tokenizer.pad_token = tokenizer.eos_token
     
-    # 初始化 vLLM 模型（vLLM 0.10.0+ 支持异步调用）
-    model = LLM(
-        model=config.model_path, 
+    # 初始化 vLLM 异步引擎
+    engine_args = AsyncEngineArgs(
+        model=config.model_path,
+        max_model_len=config.max_model_len,
+        enable_prefix_caching=True,
+        gpu_memory_utilization=config.gpu_memory_utilization,
+        trust_remote_code=True,
         tensor_parallel_size=1,  # 设置为1，不使用GPU并行
-        max_model_len=config.max_model_len, 
-        enable_prefix_caching=True, 
-        gpu_memory_utilization=config.gpu_memory_utilization
     )
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
     
     # 设置后缀tokens
     suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
@@ -131,12 +134,12 @@ async def initialize_model(config: ModelConfig = None):
     false_token = tokenizer("no", add_special_tokens=False).input_ids[0]
     
     # 设置采样参数
-    sampling_params = SamplingParams(
-        temperature=0, 
-        max_tokens=1,
-        logprobs=20, 
-        allowed_token_ids=[true_token, false_token],
-    )
+    sampling_params = {
+        "temperature": 0,
+        "max_tokens": 1,
+        "logprobs": 20,
+        "allowed_token_ids": [true_token, false_token],
+    }
     
     logger.info("模型初始化完成")
 
@@ -163,28 +166,28 @@ async def lifespan(app: FastAPI):
     yield
     
     # 关闭时清理
-    if model:
-        await model.close()
+    if engine:
+        await engine.close()
     logger.info("服务关闭完成")
 
 # FastAPI应用
 app = FastAPI(
-    title="Rerank Service (vLLM Async)", 
-    description="基于 vLLM 异步 API 的文档重排序服务",
+    title="Rerank Service (Compatible)", 
+    description="兼容 vLLM 0.10.0+ 的文档重排序服务",
     lifespan=lifespan
 )
 
 @app.get("/")
 async def root():
     """根路径"""
-    return {"message": "Rerank Service is running (vLLM Async)"}
+    return {"message": "Rerank Service is running (Compatible)"}
 
 @app.get("/health")
 async def health_check():
     """健康检查"""
     return {
         "status": "healthy", 
-        "model_loaded": model is not None,
+        "model_loaded": engine is not None,
         "model_config": {
             "model_path": model_config.model_path if model_config else None,
             "model_size": model_config.model_size if model_config else None,
@@ -211,8 +214,8 @@ async def rerank_documents(request: RerankRequest):
             suffix_tokens
         )
         
-        # 使用 vLLM 异步 API 计算分数
-        scores = await compute_logits_async(model, inputs, sampling_params, true_token, false_token)
+        # 使用异步引擎执行 vLLM 调用
+        scores = await compute_logits_async(engine, inputs, sampling_params, true_token, false_token)
         
         # 创建排序后的文档列表
         ranked_docs = [
@@ -254,9 +257,9 @@ async def reload_model(config: ModelConfig):
     try:
         logger.info("开始重新加载模型...")
         
-        # 关闭旧模型
-        if model:
-            await model.close()
+        # 关闭旧引擎
+        if engine:
+            await engine.close()
         
         # 初始化新模型
         await initialize_model(config)
