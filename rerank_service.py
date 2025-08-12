@@ -19,6 +19,8 @@ import traceback
 import gc
 from concurrent.futures import ThreadPoolExecutor
 import time
+import hashlib
+
 
 # 配置日志  
 logging.basicConfig(level=logging.INFO)
@@ -70,17 +72,24 @@ def process_inputs(pairs, instruction, max_length, suffix_tokens):
     messages = [TokensPrompt(prompt_token_ids=ele) for ele in messages]
     return messages
 
-async def compute_logits_batch(engine, messages, sampling_params, true_token, false_token):
-    """优化的批处理版本 - 使用并发处理多个消息"""
+def generate_stable_request_id(instruction, query, doc_index):
+    """生成基于内容的稳定request_id，用于KV缓存"""
+    content = f"{instruction}:{query}:{doc_index}"
+    return f"rerank_{hashlib.md5(content.encode()).hexdigest()[:16]}"
+
+async def compute_logits_batch(engine, messages, sampling_params, true_token, false_token, instruction, query):
+    """优化的批处理版本 - 使用稳定的request_id启用KV缓存"""
     try:
         scores = []
         
-        # 创建并发任务
-        async def process_single_message(message):
+        # 为每个消息生成稳定的request_id
+        for i, message in enumerate(messages):
+            request_id = generate_stable_request_id(instruction, query, i)
+            
             async for output in engine.generate(
                 prompt=message,
                 sampling_params=sampling_params,
-                request_id=f"rerank_{str(uuid.uuid4())}"
+                request_id=request_id
             ):
                 final_logits = output.outputs[0].logprobs[-1]
                 
@@ -104,11 +113,8 @@ async def compute_logits_batch(engine, messages, sampling_params, true_token, fa
                 log_softmax_scores = torch.nn.functional.log_softmax(logits_tensor, dim=0)
                 score = log_softmax_scores[1].exp().item()  # true 的概率
                 
-                return score
-        
-        # 并发处理所有消息
-        tasks = [process_single_message(message) for message in messages]
-        scores = await asyncio.gather(*tasks)
+                scores.append(score)
+                break
         
         return scores
         
@@ -116,16 +122,17 @@ async def compute_logits_batch(engine, messages, sampling_params, true_token, fa
         logger.error(f"计算 logits 时出错: {e}")
         raise
 
-async def compute_logits_async(engine, messages, sampling_params, true_token, false_token):
-    """单条处理版本 - 用于小批量或单个请求"""
+async def compute_logits_async(engine, messages, sampling_params, true_token, false_token, instruction, query):
+    """单条处理版本 - 用于小批量或单个请求，使用稳定的request_id"""
     try:
         scores = []
         
-        for message in messages:
+        for i, message in enumerate(messages):
+            request_id = generate_stable_request_id(instruction, query, i)
             async for output in engine.generate(
                 prompt=message,
                 sampling_params=sampling_params,
-                request_id=f"rerank_{str(uuid.uuid4())}"
+                request_id=request_id
             ):
                 final_logits = output.outputs[0].logprobs[-1]
                 
@@ -185,16 +192,18 @@ async def initialize_model(config: ModelConfig = None):
     tokenizer.padding_side = "left"
     tokenizer.pad_token = tokenizer.eos_token
     
-    # 初始化 vLLM 异步引擎 - 优化配置
+    # 初始化 vLLM 异步引擎 - 优化配置，重点启用KV缓存
     engine_args = AsyncEngineArgs(
         model=config.model_path,
         max_model_len=config.max_model_len,
-        enable_prefix_caching=True,
+        enable_prefix_caching=True,  # 启用前缀缓存
         gpu_memory_utilization=config.gpu_memory_utilization,
         trust_remote_code=True,
         tensor_parallel_size=1,  # 单GPU
         max_num_batched_tokens=config.max_num_batched_tokens,  # 批处理优化
         max_num_seqs=256,  # 增加并发序列数
+        enable_chunked_prefill=True,  # 启用分块预填充
+        max_num_blocks_per_seq=256,  # 每个序列的最大block数
     )
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     
@@ -301,9 +310,9 @@ async def rerank_documents(request: RerankRequest):
         
         # 根据文档数量选择处理方式
         if len(inputs) > 10:  # 大批量使用批处理
-            scores = await compute_logits_batch(engine, inputs, sampling_params, true_token, false_token)
+            scores = await compute_logits_batch(engine, inputs, sampling_params, true_token, false_token, request.instruction, request.query)
         else:  # 小批量使用单条处理
-            scores = await compute_logits_async(engine, inputs, sampling_params, true_token, false_token)
+            scores = await compute_logits_async(engine, inputs, sampling_params, true_token, false_token, request.instruction, request.query)
         
         # 创建排序后的文档列表
         ranked_docs = [
@@ -353,8 +362,8 @@ async def batch_rerank(batch_requests: List[RerankRequest]):
             suffix_tokens
         )
         
-        # 批量计算scores
-        scores = await compute_logits_batch(engine, inputs, sampling_params, true_token, false_token)
+        # 批量计算scores - 使用KV缓存
+        scores = await compute_logits_batch(engine, inputs, sampling_params, true_token, false_token, all_instructions[0], all_queries[0])
         
         # 按原始请求分组结果
         results = []
