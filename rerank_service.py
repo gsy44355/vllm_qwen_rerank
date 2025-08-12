@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import torch
 from transformers import AutoTokenizer
-from vllm import AsyncLLM, SamplingParams
+from vllm import LLM, SamplingParams
 from vllm.inputs.data import TokensPrompt
 import asyncio
 from contextlib import asynccontextmanager
@@ -65,8 +65,8 @@ def process_inputs(pairs, instruction, max_length, suffix_tokens):
 async def compute_logits_async(model, messages, sampling_params, true_token, false_token):
     """使用 vLLM 异步 API 计算 logits"""
     try:
-        # 使用 vLLM 的异步 generate 方法
-        outputs = await model.generate(messages, sampling_params, use_tqdm=False)
+        # 使用 vLLM 的异步 generate 方法（vLLM 0.10.0+）
+        outputs = await model.generate_async(messages, sampling_params, use_tqdm=False)
         
         scores = []
         for i in range(len(outputs)):
@@ -113,8 +113,8 @@ async def initialize_model(config: ModelConfig = None):
     tokenizer.padding_side = "left"
     tokenizer.pad_token = tokenizer.eos_token
     
-    # 初始化异步 vLLM 模型
-    model = AsyncLLM(
+    # 初始化 vLLM 模型（vLLM 0.10.0+ 支持异步调用）
+    model = LLM(
         model=config.model_path, 
         tensor_parallel_size=1,  # 设置为1，不使用GPU并行
         max_model_len=config.max_model_len, 
