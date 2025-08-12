@@ -65,34 +65,34 @@ def process_inputs(pairs, instruction, max_length, suffix_tokens):
     return messages
 
 async def compute_logits_async(engine, messages, sampling_params, true_token, false_token):
-    """使用 vLLM 异步引擎计算 logits"""
+    """改进的分数计算"""
     try:
         scores = []
-        # 使用异步引擎处理每个消息
+        
         for message in messages:
-            # 使用异步生成，传递正确的参数
             async for output in engine.generate(
                 prompt=message,
                 sampling_params=sampling_params,
                 request_id=f"rerank_{str(uuid.uuid4())}"
             ):
                 final_logits = output.outputs[0].logprobs[-1]
-                if true_token not in final_logits:
-                    true_logit = -10
-                else:
-                    true_logit = final_logits[true_token].logprob
-                if false_token not in final_logits:
-                    false_logit = -10
-                else:
-                    false_logit = final_logits[false_token].logprob
-                true_score = math.exp(true_logit)
-                false_score = math.exp(false_logit)
-                score = true_score / (true_score + false_score)
+                
+                # 获取 logits
+                true_logit = final_logits.get(true_token, -10)
+                false_logit = final_logits.get(false_token, -10)
+                
+                # 使用与官方一致的计算方式
+                logits_tensor = torch.tensor([false_logit, true_logit], dtype=torch.float32)
+                log_softmax_scores = torch.nn.functional.log_softmax(logits_tensor, dim=0)
+                score = log_softmax_scores[1].exp().item()  # true 的概率
+                
                 scores.append(score)
-                break  # 只取第一个输出
+                break
+                
         return scores
+        
     except Exception as e:
-        logger.error(f"计算 logits 时出错: {e}", traceback.format_exc())
+        logger.error(f"计算 logits 时出错: {e}")
         raise
 
 async def initialize_model(config: ModelConfig = None):
