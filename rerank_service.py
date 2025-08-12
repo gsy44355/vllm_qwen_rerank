@@ -20,11 +20,65 @@ import gc
 from concurrent.futures import ThreadPoolExecutor
 import time
 import hashlib
+from collections import deque
 
 
 # 配置日志  
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# 全局请求队列
+request_queue = deque()
+queue_lock = asyncio.Lock()
+
+# 聚合窗口（毫秒）
+BATCH_INTERVAL_MS = 5
+
+async def batch_worker():
+    """后台任务：定时聚合请求并批量推理"""
+    while True:
+        await asyncio.sleep(BATCH_INTERVAL_MS / 1000)
+
+        async with queue_lock:
+            if not request_queue:
+                continue
+
+            # 一次取出所有排队请求
+            current_batch = list(request_queue)
+            request_queue.clear()
+
+        # 合并所有请求的输入
+        all_pairs = []
+        all_meta = []  # 保存原请求的文档数量，方便拆分结果
+        for req, future in current_batch:
+            pairs = [(req.query, doc) for doc in req.documents]
+            all_pairs.extend(pairs)
+            all_meta.append((len(req.documents), future))
+
+        # 处理输入
+        inputs = process_inputs(
+            all_pairs,
+            current_batch[0][0].instruction,  # 用第一个请求的 instruction
+            current_batch[0][0].max_length - len(suffix_tokens),
+            suffix_tokens
+        )
+
+        try:
+            scores = await compute_logits_batch(engine, inputs, sampling_params, true_token, false_token)
+
+            # 按原始请求拆分结果
+            idx = 0
+            for doc_count, future in all_meta:
+                request_scores = scores[idx: idx + doc_count]
+                idx += doc_count
+                future.set_result(request_scores)
+
+        except Exception as e:
+            logger.error(f"批量推理失败: {e}")
+            for _, future in all_meta:
+                future.set_exception(e)
+
 
 # 请求和响应模型
 class RerankRequest(BaseModel):
@@ -166,78 +220,60 @@ async def compute_logits_async(engine, messages, sampling_params, true_token, fa
         raise
 
 async def initialize_model(config: ModelConfig = None):
-    """异步初始化模型和tokenizer - 优化版本"""
     global tokenizer, engine, suffix_tokens, true_token, false_token, sampling_params, model_config, executor
-    
-    # 使用默认配置或传入的配置
+
     if config is None:
         config = ModelConfig(
             model_path='Qwen/Qwen3-Reranker-4B',
             model_size='4B',
-            gpu_memory_utilization=0.85,  # 提高显存利用率
+            gpu_memory_utilization=0.85,
             max_model_len=10000,
-            max_num_batched_tokens=8192
+            max_num_batched_tokens=16384  # ✅ 提高批处理token限制
         )
-    
+
     model_config = config
-    
-    logger.info(f"正在初始化模型: {config.model_path}")
-    logger.info(f"模型大小: {config.model_size}")
-    logger.info(f"GPU内存使用率: {config.gpu_memory_utilization}")
-    logger.info(f"最大模型长度: {config.max_model_len}")
-    logger.info(f"批处理token数量限制: {config.max_num_batched_tokens}")
-    
-    # 初始化tokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(config.model_path)
     tokenizer.padding_side = "left"
     tokenizer.pad_token = tokenizer.eos_token
-    
-    # 初始化 vLLM 异步引擎 - 优化配置，重点启用KV缓存
+
     engine_args = AsyncEngineArgs(
         model=config.model_path,
         max_model_len=config.max_model_len,
-        enable_prefix_caching=True,  # 启用前缀缓存
+        enable_prefix_caching=True,
         gpu_memory_utilization=config.gpu_memory_utilization,
         trust_remote_code=True,
-        tensor_parallel_size=1,  # 单GPU
-        max_num_batched_tokens=config.max_num_batched_tokens,  # 批处理优化
-        max_num_seqs=256,  # 增加并发序列数
-        enable_chunked_prefill=True,  # 启用分块预填充
+        tensor_parallel_size=1,
+        max_num_batched_tokens=config.max_num_batched_tokens,
+        max_num_seqs=512,  # ✅ 提高并行序列数
     )
     engine = AsyncLLMEngine.from_engine_args(engine_args)
-    
-    # 设置后缀tokens
+
     suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
     suffix_tokens = tokenizer.encode(suffix, add_special_tokens=False)
-    
-    # 设置true/false tokens
+
     true_token = tokenizer("yes", add_special_tokens=False).input_ids[0]
     false_token = tokenizer("no", add_special_tokens=False).input_ids[0]
-    
-    # 设置采样参数
+
     sampling_params = SamplingParams(
         temperature=0,
         max_tokens=1,
         logprobs=20,
         allowed_token_ids=[true_token, false_token],
     )
-    
-    # 初始化线程池执行器
+
     executor = ThreadPoolExecutor(max_workers=4)
-    
     logger.info("模型初始化完成")
 
 # 应用生命周期管理
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理"""
-    # 启动时初始化
     model_path = os.getenv('MODEL_PATH', 'Qwen/Qwen3-Reranker-4B')
     model_size = os.getenv('MODEL_SIZE', '4B')
     gpu_memory_utilization = float(os.getenv('GPU_MEMORY_UTILIZATION', '0.85'))
     max_model_len = int(os.getenv('MAX_MODEL_LEN', '10000'))
-    max_num_batched_tokens = int(os.getenv('MAX_NUM_BATCHED_TOKENS', '8192'))
-    
+    max_num_batched_tokens = int(os.getenv('MAX_NUM_BATCHED_TOKENS', '16384'))
+
     config = ModelConfig(
         model_path=model_path,
         model_size=model_size,
@@ -245,18 +281,20 @@ async def lifespan(app: FastAPI):
         max_model_len=max_model_len,
         max_num_batched_tokens=max_num_batched_tokens
     )
-    
+
     await initialize_model(config)
     logger.info("服务启动完成")
-    
+
+    # ✅ 启动批量调度后台任务
+    loop = asyncio.get_event_loop()
+    loop.create_task(batch_worker())
+
     yield
-    
-    # 关闭时清理
+
     if engine:
         await engine.close()
     if executor:
         executor.shutdown(wait=True)
-    # 清理GPU缓存
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         gc.collect()
@@ -291,39 +329,32 @@ async def health_check():
 
 @app.post("/rerank", response_model=RerankResponse)
 async def rerank_documents(request: RerankRequest):
-    """重排序文档 - 优化版本"""
     try:
         if not request.documents:
             raise HTTPException(status_code=400, detail="文档列表不能为空")
-        
-        # 创建查询-文档对
-        pairs = [(request.query, doc) for doc in request.documents]
-        
-        # 处理输入
-        inputs = process_inputs(
-            pairs, 
-            request.instruction, 
-            request.max_length - len(suffix_tokens), 
-            suffix_tokens
-        )
-        
-        # 根据文档数量选择处理方式
-        if len(inputs) > 10:  # 大批量使用批处理
-            scores = await compute_logits_batch(engine, inputs, sampling_params, true_token, false_token, request.instruction, request.query)
-        else:  # 小批量使用单条处理
-            scores = await compute_logits_async(engine, inputs, sampling_params, true_token, false_token, request.instruction, request.query)
-        
-        # 创建排序后的文档列表
+
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+
+        async with queue_lock:
+            request_queue.append((request, future))
+
+        # 等待批量推理结果
+        scores = await future
+
         ranked_docs = [
             {"document": doc, "score": score, "rank": i + 1}
-            for i, (doc, score) in enumerate(sorted(zip(request.documents, scores), key=lambda x: x[1], reverse=True))
+            for i, (doc, score) in enumerate(
+                sorted(zip(request.documents, scores), key=lambda x: x[1], reverse=True)
+            )
         ]
-        
+
         return RerankResponse(scores=scores, ranked_documents=ranked_docs)
-        
+
     except Exception as e:
         logger.error(f"重排序过程中发生错误: {str(e)}")
         raise HTTPException(status_code=500, detail=f"内部服务器错误: {str(e)}")
+
 
 @app.post("/batch_rerank")
 async def batch_rerank(batch_requests: List[RerankRequest]):
