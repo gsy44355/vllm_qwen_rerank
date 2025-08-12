@@ -5,6 +5,7 @@ services:
     build: .
     container_name: vllm-rerank-service
     runtime: nvidia
+    network_mode: bridge
     ports:
       - "8888:8000"
     environment:
