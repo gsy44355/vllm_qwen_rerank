@@ -30,15 +30,17 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # 复制代码
 COPY rerank_service.py .
 COPY start_service.py .
+COPY docker-entrypoint.sh .
 
 # 创建非 root 用户，并确保日志目录可写
 RUN useradd --create-home --shell /bin/bash app && \
     mkdir -p /app/logs && \
-    chown -R app:app /app
+    chown -R app:app /app && \
+    chmod +x /app/docker-entrypoint.sh
 USER app
 
 # 暴露端口
 EXPOSE 8000
 
-# 启动命令
-CMD ["python", "start_service.py", "--host", "0.0.0.0", "--port", "8000"]
+# 启动命令 - 使用入口脚本
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

@@ -66,15 +66,15 @@ def check_gpu():
 
 def main():
     parser = argparse.ArgumentParser(description="启动vLLM Rerank服务")
-    parser.add_argument("--host", default="0.0.0.0", help="服务主机地址")
-    parser.add_argument("--port", type=int, default=8000, help="服务端口")
-    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="日志级别")
-    parser.add_argument("--workers", type=int, default=1, help="工作进程数")
+    parser.add_argument("--host", default=os.getenv("HOST", "0.0.0.0"), help="服务主机地址")
+    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8000")), help="服务端口")
+    parser.add_argument("--log-level", default=os.getenv("LOG_LEVEL", "INFO"), choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="日志级别")
+    parser.add_argument("--workers", type=int, default=int(os.getenv("WORKERS", "1")), help="工作进程数")
     parser.add_argument("--check-only", action="store_true", help="仅检查环境，不启动服务")
-    parser.add_argument("--model-path", default="Qwen/Qwen3-Reranker-4B", help="模型路径（本地路径或HuggingFace模型名）")
-    parser.add_argument("--model-size", default="4B", choices=["0.6B", "4B", "8B"], help="模型大小")
-    parser.add_argument("--gpu-memory-utilization", type=float, default=0.8, help="GPU内存使用率 (0.1-1.0)")
-    parser.add_argument("--max-model-len", type=int, default=10000, help="最大模型长度")
+    parser.add_argument("--model-path", default=os.getenv("MODEL_PATH", "Qwen/Qwen3-Reranker-4B"), help="模型路径（本地路径或HuggingFace模型名）")
+    parser.add_argument("--model-size", default=os.getenv("MODEL_SIZE", "4B"), choices=["0.6B", "4B", "8B"], help="模型大小")
+    parser.add_argument("--gpu-memory-utilization", type=float, default=float(os.getenv("GPU_MEMORY_UTILIZATION", "0.8")), help="GPU内存使用率 (0.1-1.0)")
+    parser.add_argument("--max-model-len", type=int, default=int(os.getenv("MAX_MODEL_LEN", "10000")), help="最大模型长度")
     
     args = parser.parse_args()
     
