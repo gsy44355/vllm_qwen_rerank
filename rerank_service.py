@@ -159,7 +159,7 @@ async def compute_logits_batch(engine, messages, sampling_params, true_token, fa
 
         # 一次性批量生成
         async for outputs in engine.generate(
-            prompts=messages,
+            prompt=messages,
             sampling_params=sampling_params,
             request_ids=request_ids,
         ):
@@ -379,75 +379,6 @@ async def rerank_documents(request: RerankRequest):
         logger.error(f"重排序过程中发生错误: {str(e)}")
         raise HTTPException(status_code=500, detail=f"内部服务器错误: {str(e)}")
 
-
-@app.post("/batch_rerank")
-async def batch_rerank(batch_requests: List[RerankRequest]):
-    """批量重排序 - 优化版本，使用真正的批处理"""
-    try:
-        if not batch_requests:
-            raise HTTPException(status_code=400, detail="批量请求不能为空")
-        
-        # 合并所有请求的文档
-        all_pairs = []
-        all_documents = []
-        all_queries = []
-        all_instructions = []
-        
-        for request in batch_requests:
-            if not request.documents:
-                continue
-            pairs = [(request.query, doc) for doc in request.documents]
-            all_pairs.extend(pairs)
-            all_documents.extend(request.documents)
-            all_queries.extend([request.query] * len(request.documents))
-            all_instructions.extend([request.instruction] * len(request.documents))
-        
-        if not all_pairs:
-            raise HTTPException(status_code=400, detail="没有有效的文档")
-        
-        # 使用第一个请求的max_length作为统一长度
-        max_length = batch_requests[0].max_length
-        
-        # 处理输入 - 批量处理
-        inputs = process_inputs(
-            all_pairs, 
-            all_instructions[0],  # 使用第一个指令
-            max_length - len(suffix_tokens), 
-            suffix_tokens
-        )
-        
-        # 批量计算scores - 使用KV缓存
-        scores = await compute_logits_batch(engine, inputs, sampling_params, true_token, false_token)
-        
-        # 按原始请求分组结果
-        results = []
-        start_idx = 0
-        for request in batch_requests:
-            if not request.documents:
-                results.append({"scores": [], "ranked_documents": []})
-                continue
-                
-            end_idx = start_idx + len(request.documents)
-            request_scores = scores[start_idx:end_idx]
-            
-            # 创建排序后的文档列表
-            ranked_docs = [
-                {"document": doc, "score": score, "rank": i + 1}
-                for i, (doc, score) in enumerate(sorted(zip(request.documents, request_scores), key=lambda x: x[1], reverse=True))
-            ]
-            
-            results.append({
-                "scores": request_scores,
-                "ranked_documents": ranked_docs
-            })
-            
-            start_idx = end_idx
-        
-        return {"results": results}
-        
-    except Exception as e:
-        logger.error(f"批量重排序过程中发生错误: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"内部服务器错误: {str(e)}")
 
 @app.post("/reload_model")
 async def reload_model(config: ModelConfig):
