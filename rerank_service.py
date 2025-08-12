@@ -14,6 +14,7 @@ from vllm.inputs.data import TokensPrompt
 import asyncio
 from contextlib import asynccontextmanager
 import uuid
+import traceback
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -86,7 +87,7 @@ async def compute_logits_async(engine, messages, sampling_params, true_token, fa
                 break  # 只取第一个输出
         return scores
     except Exception as e:
-        logger.error(f"计算 logits 时出错: {e}")
+        logger.error(f"计算 logits 时出错: {e}", traceback.format_exc())
         raise
 
 async def initialize_model(config: ModelConfig = None):
