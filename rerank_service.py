@@ -284,11 +284,14 @@ async def rerank_documents(request: RerankRequest):
         )
         scores = await compute_logits_batch(engine, inputs, sampling_params, true_token, false_token)
 
+        # 携带原始索引并排序
+        scored_with_index = [
+            (idx, doc, score) for idx, (doc, score) in enumerate(zip(request.documents, scores))
+        ]
+        scored_with_index.sort(key=lambda x: x[2], reverse=True)
         ranked_docs = [
-            {"document": doc, "score": score, "rank": i + 1}
-            for i, (doc, score) in enumerate(
-                sorted(zip(request.documents, scores), key=lambda x: x[1], reverse=True)
-            )
+            {"document": doc, "score": score, "rank": rank_idx + 1, "index": idx}
+            for rank_idx, (idx, doc, score) in enumerate(scored_with_index)
         ]
 
         return RerankResponse(scores=scores, ranked_documents=ranked_docs)
