@@ -28,56 +28,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# 全局请求队列
-request_queue = deque()
-queue_lock = asyncio.Lock()
-
-# 聚合窗口（毫秒）
-BATCH_INTERVAL_MS = 5
-
-async def batch_worker():
-    """后台任务：定时聚合请求并批量推理"""
-    while True:
-        await asyncio.sleep(BATCH_INTERVAL_MS / 1000)
-
-        async with queue_lock:
-            if not request_queue:
-                continue
-
-            # 一次取出所有排队请求
-            current_batch = list(request_queue)
-            request_queue.clear()
-
-        # 合并所有请求的输入
-        all_pairs = []
-        all_meta = []  # 保存原请求的文档数量，方便拆分结果
-        for req, future in current_batch:
-            pairs = [(req.query, doc) for doc in req.documents]
-            all_pairs.extend(pairs)
-            all_meta.append((len(req.documents), future))
-
-        # 处理输入
-        inputs = process_inputs(
-            all_pairs,
-            current_batch[0][0].instruction,  # 用第一个请求的 instruction
-            current_batch[0][0].max_length - len(suffix_tokens),
-            suffix_tokens
-        )
-
-        try:
-            scores = await compute_logits_batch(engine, inputs, sampling_params, true_token, false_token)
-
-            # 按原始请求拆分结果
-            idx = 0
-            for doc_count, future in all_meta:
-                request_scores = scores[idx: idx + doc_count]
-                idx += doc_count
-                future.set_result(request_scores)
-
-        except Exception as e:
-            logger.error(f"批量推理失败: {e}")
-            for _, future in all_meta:
-                future.set_exception(e)
+## 删除原先的批量聚合队列与后台任务，避免跨请求共享 instruction
 
 
 # 请求和响应模型
@@ -279,10 +230,6 @@ async def lifespan(app: FastAPI):
     await initialize_model(config)
     logger.info("服务启动完成")
 
-    # ✅ 启动批量调度后台任务
-    loop = asyncio.get_event_loop()
-    loop.create_task(batch_worker())
-
     yield
 
     if engine:
@@ -327,14 +274,15 @@ async def rerank_documents(request: RerankRequest):
         if not request.documents:
             raise HTTPException(status_code=400, detail="文档列表不能为空")
 
-        loop = asyncio.get_event_loop()
-        future = loop.create_future()
-
-        async with queue_lock:
-            request_queue.append((request, future))
-
-        # 等待批量推理结果
-        scores = await future
+        # 即时根据该请求的 instruction 处理，不与其他请求合并
+        pairs = [(request.query, doc) for doc in request.documents]
+        inputs = process_inputs(
+            pairs,
+            request.instruction,
+            request.max_length - len(suffix_tokens),
+            suffix_tokens
+        )
+        scores = await compute_logits_batch(engine, inputs, sampling_params, true_token, false_token)
 
         ranked_docs = [
             {"document": doc, "score": score, "rank": i + 1}
