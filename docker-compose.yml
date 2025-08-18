@@ -13,10 +13,19 @@ services:
       PYTHONUNBUFFERED: 1
       PYTHONPATH: /app
       
-      # GPU 相关
+      # GPU 相关 - 支持 CUDA MPS
       CUDA_VISIBLE_DEVICES: 0
       NVIDIA_VISIBLE_DEVICES: 0
       VLLM_WORKER_MULTIPROC_METHOD: spawn
+      
+      # CUDA MPS 相关配置
+      CUDA_MPS_PIPE_DIRECTORY: /tmp/nvidia-mps
+      CUDA_MPS_LOG_DIRECTORY: /tmp/nvidia-log
+      CUDA_MPS_ENABLE: 1
+      
+      # vLLM 多进程配置
+      VLLM_USE_MPS: 1
+      VLLM_DISABLE_CUSTOM_ALL_REDUCE: 1
       
       # 模型配置（可覆盖 Dockerfile 默认值）
       MODEL_PATH: /models/Qwen3-Reranker-0.6B
@@ -24,14 +33,17 @@ services:
       GPU_MEMORY_UTILIZATION: 0.5
       MAX_MODEL_LEN: 32000
       
-      # 服务配置
+      # 服务配置 - 支持多进程
       HOST: 0.0.0.0
       PORT: 8000
       LOG_LEVEL: INFO
-      WORKERS: 1
+      WORKERS: 2  # 启用多进程
     volumes:
       - /home/gsy/git_repo/Qwen-rerank-models/:/models/:ro
       - ./logs:/app/logs
+      # 挂载 CUDA MPS 相关目录
+      - /tmp/nvidia-mps:/tmp/nvidia-mps
+      - /tmp/nvidia-log:/tmp/nvidia-log
     deploy: {}  # 防止某些版本报错
     restart: unless-stopped
     healthcheck:

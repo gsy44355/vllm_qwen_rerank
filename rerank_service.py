@@ -178,6 +178,17 @@ async def initialize_model(config: ModelConfig = None):
 
     model_config = config
 
+    # 检查 CUDA MPS 支持
+    mps_enabled = os.getenv('CUDA_MPS_ENABLE', '0') == '1'
+    if mps_enabled:
+        logger.info("CUDA MPS 已启用，将使用多进程安全模式")
+        # 设置 CUDA MPS 相关环境变量
+        os.environ['CUDA_MPS_ENABLE'] = '1'
+        os.environ['VLLM_USE_MPS'] = '1'
+        os.environ['VLLM_DISABLE_CUSTOM_ALL_REDUCE'] = '1'
+    else:
+        logger.info("使用标准 CUDA 模式")
+
     tokenizer = AutoTokenizer.from_pretrained(config.model_path)
     tokenizer.padding_side = "left"
     tokenizer.pad_token = tokenizer.eos_token
@@ -191,6 +202,8 @@ async def initialize_model(config: ModelConfig = None):
         tensor_parallel_size=1,
         max_num_batched_tokens=config.max_num_batched_tokens,
         max_num_seqs=512,  # ✅ 提高并行序列数
+        # CUDA MPS 相关配置
+        disable_custom_all_reduce=mps_enabled,  # 在 MPS 模式下禁用自定义 all-reduce
     )
     engine = AsyncLLMEngine.from_engine_args(engine_args)
 
