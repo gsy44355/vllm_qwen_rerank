@@ -31,6 +31,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY rerank_service.py .
 COPY start_service.py .
 COPY docker-entrypoint.sh .
+COPY start_gunicorn.py .
 
 # 创建非 root 用户，并确保日志目录可写
 RUN useradd --create-home --shell /bin/bash app && \
