@@ -142,7 +142,6 @@ def main():
             # 添加 vLLM 特定的优化配置
             "--max-requests-jitter", "0",  # 禁用 jitter，避免意外重启
             "--graceful-timeout", "60",    # 优雅关闭超时时间
-            "--worker-exit-on-app-exit",   # 应用退出时 worker 也退出
             "rerank_service:app"
         ]
         
