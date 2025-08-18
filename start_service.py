@@ -75,6 +75,9 @@ def main():
     parser.add_argument("--model-size", default=os.getenv("MODEL_SIZE", "4B"), choices=["0.6B", "4B", "8B"], help="模型大小")
     parser.add_argument("--gpu-memory-utilization", type=float, default=float(os.getenv("GPU_MEMORY_UTILIZATION", "0.8")), help="GPU内存使用率 (0.1-1.0)")
     parser.add_argument("--max-model-len", type=int, default=int(os.getenv("MAX_MODEL_LEN", "10000")), help="最大模型长度")
+    parser.add_argument("--max-num-seqs", type=int, default=int(os.getenv("MAX_NUM_SEQS", "512")), help="最大并发序列数")
+    parser.add_argument("--tensor-parallel-size", type=int, default=int(os.getenv("TENSOR_PARALLEL_SIZE", "1")), help="张量并行大小")
+    parser.add_argument("--max-workers", type=int, default=int(os.getenv("MAX_WORKERS", "4")), help="线程池工作线程数")
     
     args = parser.parse_args()
     
@@ -109,6 +112,9 @@ def main():
     os.environ['MODEL_SIZE'] = args.model_size
     os.environ['GPU_MEMORY_UTILIZATION'] = str(args.gpu_memory_utilization)
     os.environ['MAX_MODEL_LEN'] = str(args.max_model_len)
+    os.environ['MAX_NUM_SEQS'] = str(args.max_num_seqs)
+    os.environ['TENSOR_PARALLEL_SIZE'] = str(args.tensor_parallel_size)
+    os.environ['MAX_WORKERS'] = str(args.max_workers)
     
     # 启动服务
     print(f"启动服务: http://{args.host}:{args.port}")
@@ -116,6 +122,10 @@ def main():
     print(f"模型大小: {args.model_size}")
     print(f"GPU内存使用率: {args.gpu_memory_utilization}")
     print(f"最大模型长度: {args.max_model_len}")
+    print(f"最大并发序列数: {args.max_num_seqs}")
+    print(f"张量并行大小: {args.tensor_parallel_size}")
+    print(f"线程池工作线程数: {args.max_workers}")
+    print(f"FastAPI工作进程数: {args.workers}")
     print("按 Ctrl+C 停止服务")
     print("-" * 50)
     

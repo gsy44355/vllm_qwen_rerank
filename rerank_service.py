@@ -48,6 +48,9 @@ class ModelConfig(BaseModel):
     gpu_memory_utilization: float = 0.85  # 提高显存利用率
     max_model_len: int = 10000
     max_num_batched_tokens: int = 8192  # 批处理token数量限制
+    max_num_seqs: int = 512  # 并发序列数
+    tensor_parallel_size: int = 1  # 张量并行大小
+    max_workers: int = 4  # 线程池工作线程数
 
 # 全局变量
 tokenizer = None
@@ -173,7 +176,10 @@ async def initialize_model(config: ModelConfig = None):
             model_size='4B',
             gpu_memory_utilization=0.85,
             max_model_len=10000,
-            max_num_batched_tokens=16384  # ✅ 提高批处理token限制
+            max_num_batched_tokens=16384,  # ✅ 提高批处理token限制
+            max_num_seqs=512,  # 并发序列数
+            tensor_parallel_size=1,  # 张量并行大小
+            max_workers=4  # 线程池工作线程数
         )
 
     model_config = config
@@ -188,9 +194,9 @@ async def initialize_model(config: ModelConfig = None):
         enable_prefix_caching=True,
         gpu_memory_utilization=config.gpu_memory_utilization,
         trust_remote_code=True,
-        tensor_parallel_size=1,
+        tensor_parallel_size=config.tensor_parallel_size,
         max_num_batched_tokens=config.max_num_batched_tokens,
-        max_num_seqs=512,  # ✅ 提高并行序列数
+        max_num_seqs=config.max_num_seqs,  # ✅ 可配置的并行序列数
     )
     engine = AsyncLLMEngine.from_engine_args(engine_args)
 
@@ -207,7 +213,7 @@ async def initialize_model(config: ModelConfig = None):
         allowed_token_ids=[true_token, false_token],
     )
 
-    executor = ThreadPoolExecutor(max_workers=4)
+    executor = ThreadPoolExecutor(max_workers=config.max_workers)
     logger.info("模型初始化完成")
 
 # 应用生命周期管理
@@ -218,13 +224,19 @@ async def lifespan(app: FastAPI):
     gpu_memory_utilization = float(os.getenv('GPU_MEMORY_UTILIZATION', '0.85'))
     max_model_len = int(os.getenv('MAX_MODEL_LEN', '10000'))
     max_num_batched_tokens = int(os.getenv('MAX_NUM_BATCHED_TOKENS', '16384'))
+    max_num_seqs = int(os.getenv('MAX_NUM_SEQS', '512'))
+    tensor_parallel_size = int(os.getenv('TENSOR_PARALLEL_SIZE', '1'))
+    max_workers = int(os.getenv('MAX_WORKERS', '4'))
 
     config = ModelConfig(
         model_path=model_path,
         model_size=model_size,
         gpu_memory_utilization=gpu_memory_utilization,
         max_model_len=max_model_len,
-        max_num_batched_tokens=max_num_batched_tokens
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_seqs,
+        tensor_parallel_size=tensor_parallel_size,
+        max_workers=max_workers
     )
 
     await initialize_model(config)
@@ -264,7 +276,10 @@ async def health_check():
             "model_size": model_config.model_size if model_config else None,
             "gpu_memory_utilization": model_config.gpu_memory_utilization if model_config else None,
             "max_model_len": model_config.max_model_len if model_config else None,
-            "max_num_batched_tokens": model_config.max_num_batched_tokens if model_config else None
+            "max_num_batched_tokens": model_config.max_num_batched_tokens if model_config else None,
+            "max_num_seqs": model_config.max_num_seqs if model_config else None,
+            "tensor_parallel_size": model_config.tensor_parallel_size if model_config else None,
+            "max_workers": model_config.max_workers if model_config else None
         } if model_config else None
     }
 
