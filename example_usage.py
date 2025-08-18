@@ -135,15 +135,6 @@ def main():
     
     print("\n" + "-" * 30)
     
-    # 测试批量重排序
-    test_batch_rerank()
-    
-    print("\n" + "-" * 30)
-    
-    # 测试重新加载模型
-    test_reload_model()
-    
-    print("\n" + "=" * 50)
     print("所有测试完成")
 
 if __name__ == "__main__":
