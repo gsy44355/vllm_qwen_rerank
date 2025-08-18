@@ -73,7 +73,7 @@ def main():
     parser.add_argument("--model-size", default=os.getenv("MODEL_SIZE", "4B"), choices=["0.6B", "4B", "8B"], help="模型大小")
     parser.add_argument("--gpu-memory-utilization", type=float, default=float(os.getenv("GPU_MEMORY_UTILIZATION", "0.8")), help="GPU内存使用率")
     parser.add_argument("--max-model-len", type=int, default=int(os.getenv("MAX_MODEL_LEN", "10000")), help="最大模型长度")
-    parser.add_argument("--config", default="gun.conf", help="Gunicorn配置文件路径")
+    parser.add_argument("--config", default="gun.py", help="Gunicorn配置文件路径")
     
     args = parser.parse_args()
     
