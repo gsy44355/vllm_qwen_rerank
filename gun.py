@@ -16,7 +16,7 @@ keepalive = 5
 graceful_timeout = 60
 
 # 预加载应用
-preload_app = True
+preload_app = False
 
 # 临时目录
 worker_tmp_dir = "/dev/shm"
