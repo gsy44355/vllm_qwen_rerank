@@ -92,10 +92,11 @@ async def compute_logits_batch(engine, messages, sampling_params, true_token, fa
         async def compute_one(msg) -> float:
             # 生成稳定 request_id（基于 tokens）
             token_ids = getattr(msg, "prompt_token_ids", None)
-            if token_ids is None:
-                rid = f"rerank_{hashlib.md5(str(msg).encode()).hexdigest()[:16]}"
-            else:
-                rid = generate_stable_request_id_from_tokens(token_ids)
+            # if token_ids is None:
+            #     rid = f"rerank_{hashlib.md5(str(msg).encode()).hexdigest()[:16]}"
+            # else:
+            #     rid = generate_stable_request_id_from_tokens(token_ids)
+            rid = str(uuid.uuid4())
 
             async for output in engine.generate(
                 prompt=msg,
