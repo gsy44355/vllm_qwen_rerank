@@ -1,33 +1,33 @@
 services:
   rerank-service:
     build: .
-    container_name: vllm-rerank-service
+    container_name: vllm-rerank-service-4B
     network_mode: bridge
     ports:
-      - "8888:8000"
+      - "30603:8000"
     environment:
       # Python 相关
       PYTHONUNBUFFERED: 1
       PYTHONPATH: /app
-      
+
       # GPU 相关
       CUDA_VISIBLE_DEVICES: 0
       NVIDIA_VISIBLE_DEVICES: 0
       VLLM_WORKER_MULTIPROC_METHOD: spawn
-      
+
       # 模型配置（可覆盖 Dockerfile 默认值）
-      MODEL_PATH: /models/Qwen3-Reranker-0.6B
-      MODEL_SIZE: 0.6B
-      GPU_MEMORY_UTILIZATION: 0.5
-      MAX_MODEL_LEN: 32000
-      
+      MODEL_PATH: /models/Qwen3-Reranker-4B
+      MODEL_SIZE: 4B
+      GPU_MEMORY_UTILIZATION: 0.7
+      MAX_MODEL_LEN: 16384
+
       # 服务配置
       HOST: 0.0.0.0
       PORT: 8000
       LOG_LEVEL: INFO
       WORKERS: 1
     volumes:
-      - /home/gsy/git_repo/Qwen-rerank-models/:/models/:ro
+      - /root/git_model/:/models/:ro
       - ./logs:/app/logs
     deploy:
       resources:
