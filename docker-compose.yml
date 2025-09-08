@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   rerank-service:
     build: .
@@ -32,7 +30,13 @@ services:
     volumes:
       - /home/gsy/git_repo/Qwen-rerank-models/:/models/:ro
       - ./logs:/app/logs
-    deploy: {}  # 防止某些版本报错
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all # 使用 'all' 来指定所有可用的 GPU
+              capabilities: [gpu]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
