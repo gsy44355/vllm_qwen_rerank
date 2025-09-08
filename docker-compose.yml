@@ -2,7 +2,6 @@ services:
   rerank-service:
     build: .
     container_name: vllm-rerank-service
-    runtime: nvidia
     network_mode: bridge
     ports:
       - "8888:8000"
@@ -36,10 +35,10 @@ services:
           devices:
             - driver: nvidia
               count: all # 使用 'all' 来指定所有可用的 GPU
-              capabilities: [gpu]
+              capabilities: [ gpu ]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
