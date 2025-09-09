@@ -26,8 +26,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 
 # 安装 Python 依赖（如果需要 GPU，可在 requirements.txt 里写 torch==x.y.z+cu118）
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir -r requirements.txt
 
 # 复制代码
 COPY rerank_service.py .

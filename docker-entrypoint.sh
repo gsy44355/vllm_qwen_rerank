@@ -21,7 +21,7 @@ echo ""
 
 # 构建启动命令
 CMD_ARGS=(
-    "python" "start_gunicorn.py"
+    "python3" "start_gunicorn.py"
     "--host" "${HOST:-0.0.0.0}"
     "--port" "${PORT:-8000}"
     "--model-path" "${MODEL_PATH:-Qwen/Qwen3-Reranker-4B}"
