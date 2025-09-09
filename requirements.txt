@@ -1,9 +1,6 @@
---extra-index-url https://download.pytorch.org/whl/cu121
-vllm
 fastapi
 uvicorn
 gunicorn
 pydantic
 transformers
-torch==2.3.1+cu121
 aiohttp

@@ -1,6 +1,22 @@
 # 使用官方 Python 3.10 镜像（slim 版，体积小）
+# 基础镜像：CUDA 12.1 runtime + cuDNN
 FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 LABEL author="gsy"
+# 安装 Python 和基础依赖
+RUN apt-get update && apt-get install -y \
+    python3-pip \
+    python3-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装支持 V100 (sm70) 的 PyTorch
+#RUN pip3 install --upgrade pip \
+#    && pip3 install torch==2.3.1+cu121 torchvision==0.15.1+cu121 torchaudio==2.3.1+cu121 \
+#    -f https://download.pytorch.org/whl/torch_stable.html
+RUN pip3 install --upgrade pip  &&  pip3 install torch==2.3.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+# 安装 vLLM
+RUN pip3 install vllm
+
 # 设置工作目录
 WORKDIR /app
 
@@ -14,20 +30,19 @@ ENV PYTHONUNBUFFERED=1 \
     MAX_MODEL_LEN=10000
 
 # 安装系统依赖和 GPU 运行必备工具
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    curl \
-    git \
-    python3-pip \
-    python3-dev \
-    && rm -rf /var/lib/apt/lists/*
+#RUN apt-get update && apt-get install -y \
+#    build-essential \
+#    curl \
+#    git \
+#    python3-pip \
+#    python3-dev \
+#    && rm -rf /var/lib/apt/lists/*
 
 # 复制 requirements.txt
 COPY requirements.txt .
 
 # 安装 Python 依赖（如果需要 GPU，可在 requirements.txt 里写 torch==x.y.z+cu118）
-RUN pip3 install --no-cache-dir --upgrade pip && \
-    pip3 install --no-cache-dir -r requirements.txt
+RUN pip3 install -r requirements.txt
 
 # 复制代码
 COPY rerank_service.py .
