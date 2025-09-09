@@ -1,6 +1,6 @@
 # 使用官方 Python 3.10 镜像（slim 版，体积小）
-FROM python:3.10-slim
-
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+LABEL author="gsy"
 # 设置工作目录
 WORKDIR /app
 
@@ -18,6 +18,8 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     git \
+    python3-pip \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制 requirements.txt
