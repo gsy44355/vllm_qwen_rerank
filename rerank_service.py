@@ -326,6 +326,7 @@ async def rerank_documents(request: RerankRequest):
 
         # 即时根据该请求的 instruction 处理，不与其他请求合并
         pairs = [(request.query, doc) for doc in request.documents]
+        logger.info("pairs=%s", pairs)
         inputs = process_inputs(
             pairs,
             instruction,
