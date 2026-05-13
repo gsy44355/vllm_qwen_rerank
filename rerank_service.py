@@ -95,9 +95,11 @@ def format_instruction(instruction, query, doc):
 def process_inputs(pairs, instruction, max_length, suffix_tokens):
     """处理输入数据 - 优化版本"""
     messages = [format_instruction(instruction, query, doc) for query, doc in pairs]
+    logger.info("messages", messages)
     messages = tokenizer.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=False, enable_thinking=False
     )
+    logger.info("messages2: ", messages)
     messages = [ele[:max_length] + suffix_tokens for ele in messages]
     messages = [TokensPrompt(prompt_token_ids=ele) for ele in messages]
     return messages
