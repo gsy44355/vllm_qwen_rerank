@@ -332,8 +332,9 @@ async def rerank_documents(request: RerankRequest):
             request.max_length - len(suffix_tokens),
             suffix_tokens
         )
+        logger.info("inputs=%s", inputs)
         scores = await compute_logits_batch(engine, inputs, sampling_params, true_token, false_token)
-
+        logger.info("scores=%s", scores)
         # 携带原始索引并排序
         scored_with_index = [
             (idx, doc, score) for idx, (doc, score) in enumerate(zip(request.documents, scores))
