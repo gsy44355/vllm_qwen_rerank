@@ -99,7 +99,7 @@ def process_inputs(pairs, instruction, max_length, suffix_tokens):
     messages = tokenizer.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=False, enable_thinking=False
     )
-    logger.info("messages2: ", messages)
+    logger.info(f"messages2: {messages}")
     messages = [ele[:max_length] + suffix_tokens for ele in messages]
     messages = [TokensPrompt(prompt_token_ids=ele) for ele in messages]
     return messages
