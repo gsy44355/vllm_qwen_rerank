@@ -1,6 +1,7 @@
 # Requires vllm>=0.10.0
 import logging
 import os
+import sys
 from typing import Dict, Optional, List, Any
 import json
 import math
@@ -24,11 +25,23 @@ from collections import deque
 
 
 # 配置日志  
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
+)
 logger = logging.getLogger(__name__)
 
 
 ## 删除原先的批量聚合队列与后台任务，避免跨请求共享 instruction
+
+
+def _truncate_text(text: str, max_len: int = 200) -> str:
+    """日志打印时截断长文本，避免刷屏。"""
+    if len(text) <= max_len:
+        return text
+    return f"{text[:max_len]}...(len={len(text)})"
 
 
 # 请求和响应模型
@@ -37,10 +50,22 @@ class RerankRequest(BaseModel):
     documents: List[str]
     instruction: str = "判断文档是否满足查询要求。答案只能是'yes'或'no'。"
     max_length: int = 8192
+    topk: Optional[int] = None
+    extra_body: Optional[Dict[str, Any]] = None
+
+class RerankDataItem(BaseModel):
+    index: int
+    relevance_score: float
+    document: str
+
+class RerankUsage(BaseModel):
+    total_tokens: int = 0
 
 class RerankResponse(BaseModel):
-    scores: List[float]
-    ranked_documents: List[Dict[str, Any]]
+    id: str
+    object: str = "list"
+    data: List[RerankDataItem]
+    usage: RerankUsage
 
 class ModelConfig(BaseModel):
     model_path: str
@@ -271,15 +296,39 @@ async def health_check():
 
 @app.post("/rerank", response_model=RerankResponse)
 async def rerank_documents(request: RerankRequest):
+    
     try:
         if not request.documents:
             raise HTTPException(status_code=400, detail="文档列表不能为空")
+
+        if request.topk is not None and request.topk <= 0:
+            raise HTTPException(status_code=400, detail="topk 必须大于 0")
+
+        topk = request.topk if request.topk is not None else len(request.documents)
+        topk = min(topk, len(request.documents))
+
+        instruction = request.instruction
+        instruction_source = "body.instruction"
+        if request.extra_body and request.extra_body.get("instruction"):
+            instruction = request.extra_body["instruction"]
+            instruction_source = "body.extra_body.instruction"
+
+        logger.info(
+            "收到 /rerank 请求: query=%s, documents_count=%d, topk=%d, max_length=%d, instruction_source=%s, instruction=%s, document_preview=%s",
+            _truncate_text(request.query),
+            len(request.documents),
+            topk,
+            request.max_length,
+            instruction_source,
+            _truncate_text(instruction),
+            [_truncate_text(doc, 120) for doc in request.documents[:3]],
+        )
 
         # 即时根据该请求的 instruction 处理，不与其他请求合并
         pairs = [(request.query, doc) for doc in request.documents]
         inputs = process_inputs(
             pairs,
-            request.instruction,
+            instruction,
             request.max_length - len(suffix_tokens),
             suffix_tokens
         )
@@ -290,12 +339,24 @@ async def rerank_documents(request: RerankRequest):
             (idx, doc, score) for idx, (doc, score) in enumerate(zip(request.documents, scores))
         ]
         scored_with_index.sort(key=lambda x: x[2], reverse=True)
-        ranked_docs = [
-            {"document": doc, "score": score, "rank": rank_idx + 1, "index": idx}
-            for rank_idx, (idx, doc, score) in enumerate(scored_with_index)
+        rerank_data = [
+            RerankDataItem(
+                index=idx,
+                relevance_score=score,
+                document=doc,
+            )
+            for idx, doc, score in scored_with_index[:topk]
         ]
 
-        return RerankResponse(scores=scores, ranked_documents=ranked_docs)
+        return RerankResponse(
+            id=f"rnk-{uuid.uuid4().hex[:20]}",
+            object="list",
+            data=rerank_data,
+            usage=RerankUsage(total_tokens=0),
+        )
+
+    except HTTPException:
+        raise
 
     except Exception as e:
         logger.error(f"重排序过程中发生错误: {str(e)}")

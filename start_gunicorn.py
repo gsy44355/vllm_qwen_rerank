@@ -133,6 +133,9 @@ def main():
             "--worker-class", "uvicorn.workers.UvicornWorker",
             "--timeout", "300",
             "--keep-alive", "5",
+            "--access-logfile", "-",
+            "--error-logfile", "-",
+            "--capture-output",
             # 移除 max-requests 限制，避免频繁重启
             # "--max-requests", "1000",
             # "--max-requests-jitter", "100",

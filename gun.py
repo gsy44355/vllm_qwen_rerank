@@ -23,6 +23,9 @@ worker_tmp_dir = "/dev/shm"
 
 # 日志级别
 loglevel = "info"
+accesslog = "-"
+errorlog = "-"
+capture_output = True
 
 # 最大请求数（禁用以避免频繁重启）
 max_requests_jitter = 0
