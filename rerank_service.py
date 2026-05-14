@@ -44,6 +44,19 @@ def _truncate_text(text: str, max_len: int = 200) -> str:
     return f"{text[:max_len]}...(len={len(text)})"
 
 
+def _get_prompt_token_ids(prompt) -> List[int]:
+    """从 TokensPrompt 中安全提取 prompt_token_ids。
+
+    vLLM 中 TokensPrompt 通常是 TypedDict（dict），少数版本是对象，
+    这里同时兼容两种形态，且任何异常都退化为空列表，避免影响主流程。
+    """
+    if prompt is None:
+        return []
+    if isinstance(prompt, dict):
+        return prompt.get("prompt_token_ids") or []
+    return getattr(prompt, "prompt_token_ids", None) or []
+
+
 # 默认指令（Qwen3-Reranker 训练所用 prompt 模板）
 DEFAULT_INSTRUCTION = "判断文档是否满足查询要求。答案只能是'yes'或'no'。"
 
@@ -424,8 +437,8 @@ async def _do_rerank(request: RerankRequest) -> RerankResponse:
     pairs = [(query_text, doc) for doc in documents]
     inputs = process_inputs(pairs, instruction, max_pair_len, suffix_tokens)
 
-    # 统计 prompt token 数用于 usage.total_tokens
-    total_tokens = sum(len(p.prompt_token_ids) for p in inputs)
+    # 统计 prompt token 数用于 usage.total_tokens（兼容 dict 与对象两种形态）
+    total_tokens = sum(len(_get_prompt_token_ids(p)) for p in inputs)
 
     scores = await compute_logits_batch(
         engine, inputs, sampling_params, true_token, false_token
