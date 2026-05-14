@@ -28,26 +28,34 @@ def test_health():
         return False
 
 def test_rerank():
-    """测试重排序功能"""
+    """测试 vLLM 风格 rerank 接口（兼容 Jina/Cohere rerank API）"""
     data = {
+        "model": "Qwen/Qwen3-Reranker-4B",
         "query": "人工智能",
         "documents": [
             "机器学习是人工智能的一个子领域",
             "深度学习是机器学习的一种方法",
             "自然语言处理是AI的重要分支",
-            "计算机视觉处理图像和视频"
+            "计算机视觉处理图像和视频",
         ],
-        "instruction": "判断文档是否与查询相关。答案只能是'yes'或'no'。"
+        "top_n": 3,
+        "instruction": "判断文档是否与查询相关。答案只能是'yes'或'no'。",
     }
-    
+
     try:
-        response = requests.post(f"{BASE_URL}/rerank", json=data)
+        response = requests.post(f"{BASE_URL}/v1/rerank", json=data)
         if response.status_code == 200:
             result = response.json()
             print("✓ 重排序测试通过")
+            print(f"id={result['id']}, model={result['model']}, "
+                  f"total_tokens={result['usage']['total_tokens']}")
             print("重排序结果:")
-            for doc in result['ranked_documents']:
-                print(f"  排名 {doc['rank']}: {doc['document']} (分数: {doc['score']:.4f})")
+            for rank, item in enumerate(result["results"], start=1):
+                print(
+                    f"  排名 {rank}: index={item['index']}  "
+                    f"score={item['relevance_score']:.4f}  "
+                    f"doc={item['document']['text']}"
+                )
             return True
         else:
             print(f"✗ 重排序测试失败: {response.status_code}")
@@ -79,39 +87,6 @@ def test_reload_model():
             return False
     except Exception as e:
         print(f"✗ 模型重新加载测试异常: {e}")
-        return False
-
-def test_batch_rerank():
-    """测试批量重排序"""
-    batch_data = [
-        {
-            "query": "机器学习",
-            "documents": ["深度学习", "神经网络", "支持向量机", "决策树"],
-            "instruction": "判断文档是否与查询相关。"
-        },
-        {
-            "query": "自然语言处理",
-            "documents": ["文本分类", "机器翻译", "情感分析", "语音识别"],
-            "instruction": "判断文档是否与查询相关。"
-        }
-    ]
-    
-    try:
-        response = requests.post(f"{BASE_URL}/batch_rerank", json=batch_data)
-        if response.status_code == 200:
-            result = response.json()
-            print("✓ 批量重排序测试通过")
-            for i, batch_result in enumerate(result['results']):
-                print(f"\n批次 {i+1}:")
-                for doc in batch_result['ranked_documents']:
-                    print(f"  排名 {doc['rank']}: {doc['document']} (分数: {doc['score']:.4f})")
-            return True
-        else:
-            print(f"✗ 批量重排序测试失败: {response.status_code}")
-            print(response.text)
-            return False
-    except Exception as e:
-        print(f"✗ 批量重排序测试异常: {e}")
         return False
 
 def main():

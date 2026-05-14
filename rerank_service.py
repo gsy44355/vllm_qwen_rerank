@@ -2,12 +2,12 @@
 import logging
 import os
 import sys
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Literal, Union
 import json
 import math
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import torch
 from transformers import AutoTokenizer
 from vllm.engine.async_llm_engine import AsyncLLMEngine, AsyncEngineArgs
@@ -44,28 +44,79 @@ def _truncate_text(text: str, max_len: int = 200) -> str:
     return f"{text[:max_len]}...(len={len(text)})"
 
 
-# 请求和响应模型
+# 默认指令（Qwen3-Reranker 训练所用 prompt 模板）
+DEFAULT_INSTRUCTION = "判断文档是否满足查询要求。答案只能是'yes'或'no'。"
+
+
+# ===== vLLM 风格 Rerank API 数据模型 =====
+# 参考: https://docs.vllm.ai/en/latest/models/pooling_models/scoring/#rerank-api
+# 兼容 Jina AI / Cohere v1 & v2 rerank 接口
+
 class RerankRequest(BaseModel):
+    """vLLM 风格的 rerank 请求体。"""
+
+    model: Optional[str] = None
     query: str
     documents: List[str]
-    instruction: str = "判断文档是否满足查询要求。答案只能是'yes'或'no'。"
-    max_length: int = 8192
-    topk: Optional[int] = None
-    extra_body: Optional[Dict[str, Any]] = None
+    top_n: int = Field(
+        default=0,
+        description="返回前 N 条结果；0 或不传时返回全部文档（与 vLLM 一致）。",
+    )
+    truncate_prompt_tokens: Optional[int] = Field(
+        default=None,
+        description="对拼接后的 query+document prompt 截断到该 token 数；None 表示不截断。",
+    )
+    truncation_side: Optional[Literal["left", "right"]] = Field(
+        default=None,
+        description="truncate_prompt_tokens 生效时的截断方向。",
+    )
+    max_tokens_per_query: int = Field(
+        default=0,
+        description="单条 query 的最大 token 数（0 表示不限制）。",
+    )
+    max_tokens_per_doc: int = Field(
+        default=0,
+        description="单条 document 的最大 token 数（0 表示不限制）。",
+    )
+    instruction: Optional[str] = Field(
+        default=None,
+        description="拼接到 prompt 中的任务指令；不传则使用服务端默认指令。",
+    )
+    chat_template_kwargs: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="额外的 chat template 参数；其中 instruction 字段等价于顶层 instruction。",
+    )
+    user: Optional[str] = None
+    request_id: Optional[str] = None
+    priority: int = 0
+    use_activation: Optional[bool] = None
 
-class RerankDataItem(BaseModel):
+
+class RerankDocument(BaseModel):
+    """vLLM rerank 响应中的 document 对象。"""
+
+    text: str
+
+
+class RerankResult(BaseModel):
+    """vLLM rerank 响应中的单条结果。"""
+
     index: int
+    document: RerankDocument
     relevance_score: float
-    document: str
+
 
 class RerankUsage(BaseModel):
     total_tokens: int = 0
 
+
 class RerankResponse(BaseModel):
+    """vLLM 风格的 rerank 响应体。"""
+
     id: str
-    object: str = "list"
-    data: List[RerankDataItem]
+    model: str
     usage: RerankUsage
+    results: List[RerankResult]
 
 class ModelConfig(BaseModel):
     model_path: str
@@ -296,74 +347,127 @@ async def health_check():
         } if model_config else None
     }
 
+async def _do_rerank(request: RerankRequest) -> RerankResponse:
+    """vLLM 风格 rerank 的核心实现，被 /rerank、/v1/rerank、/v2/rerank 共用。"""
+
+    if not request.documents:
+        raise HTTPException(status_code=400, detail="documents 列表不能为空")
+
+    if request.top_n < 0:
+        raise HTTPException(status_code=400, detail="top_n 必须 >= 0")
+
+    if request.truncate_prompt_tokens is not None and request.truncate_prompt_tokens <= 0:
+        raise HTTPException(
+            status_code=400, detail="truncate_prompt_tokens 必须 > 0"
+        )
+
+    # top_n=0 或未传时返回全部
+    top_n = request.top_n if request.top_n > 0 else len(request.documents)
+    top_n = min(top_n, len(request.documents))
+
+    # 解析 instruction：顶层 instruction > chat_template_kwargs.instruction > 默认值
+    instruction = request.instruction
+    instruction_source = "body.instruction"
+    if instruction is None and request.chat_template_kwargs:
+        ct_instruction = request.chat_template_kwargs.get("instruction")
+        if ct_instruction:
+            instruction = ct_instruction
+            instruction_source = "body.chat_template_kwargs.instruction"
+    if instruction is None:
+        instruction = DEFAULT_INSTRUCTION
+        instruction_source = "default"
+
+    # 解析 prompt 截断长度
+    if request.truncate_prompt_tokens is not None:
+        max_prompt_len = request.truncate_prompt_tokens
+    else:
+        max_prompt_len = model_config.max_model_len if model_config else 8192
+    max_pair_len = max(1, max_prompt_len - len(suffix_tokens))
+
+    served_model = request.model or (
+        model_config.model_path if model_config else "rerank-model"
+    )
+
+    logger.info(
+        "收到 rerank 请求: model=%s, query=%s, documents_count=%d, top_n=%d, "
+        "truncate_prompt_tokens=%s, instruction_source=%s, instruction=%s, document_preview=%s",
+        served_model,
+        _truncate_text(request.query),
+        len(request.documents),
+        top_n,
+        request.truncate_prompt_tokens,
+        instruction_source,
+        _truncate_text(instruction),
+        [_truncate_text(doc, 120) for doc in request.documents[:3]],
+    )
+
+    # 可选的 query / doc 维度截断（按 token 截断）
+    query_text = request.query
+    if request.max_tokens_per_query and request.max_tokens_per_query > 0:
+        q_ids = tokenizer.encode(query_text, add_special_tokens=False)
+        if len(q_ids) > request.max_tokens_per_query:
+            q_ids = q_ids[: request.max_tokens_per_query]
+            query_text = tokenizer.decode(q_ids, skip_special_tokens=True)
+
+    documents = request.documents
+    if request.max_tokens_per_doc and request.max_tokens_per_doc > 0:
+        truncated_docs: List[str] = []
+        for doc in documents:
+            d_ids = tokenizer.encode(doc, add_special_tokens=False)
+            if len(d_ids) > request.max_tokens_per_doc:
+                d_ids = d_ids[: request.max_tokens_per_doc]
+                truncated_docs.append(tokenizer.decode(d_ids, skip_special_tokens=True))
+            else:
+                truncated_docs.append(doc)
+        documents = truncated_docs
+
+    pairs = [(query_text, doc) for doc in documents]
+    inputs = process_inputs(pairs, instruction, max_pair_len, suffix_tokens)
+
+    # 统计 prompt token 数用于 usage.total_tokens
+    total_tokens = sum(len(p.prompt_token_ids) for p in inputs)
+
+    scores = await compute_logits_batch(
+        engine, inputs, sampling_params, true_token, false_token
+    )
+
+    scored_with_index = [
+        (idx, doc, score)
+        for idx, (doc, score) in enumerate(zip(request.documents, scores))
+    ]
+    scored_with_index.sort(key=lambda x: x[2], reverse=True)
+
+    results = [
+        RerankResult(
+            index=idx,
+            document=RerankDocument(text=doc),
+            relevance_score=score,
+        )
+        for idx, doc, score in scored_with_index[:top_n]
+    ]
+
+    response_id = request.request_id or f"rerank-{uuid.uuid4().hex}"
+
+    return RerankResponse(
+        id=response_id,
+        model=served_model,
+        usage=RerankUsage(total_tokens=total_tokens),
+        results=results,
+    )
+
+
 @app.post("/rerank", response_model=RerankResponse)
+@app.post("/v1/rerank", response_model=RerankResponse)
+@app.post("/v2/rerank", response_model=RerankResponse)
 async def rerank_documents(request: RerankRequest):
-    
+    """vLLM 风格的 rerank 接口，兼容 Jina AI / Cohere v1 & v2 rerank API。"""
     try:
-        if not request.documents:
-            raise HTTPException(status_code=400, detail="文档列表不能为空")
-
-        if request.topk is not None and request.topk <= 0:
-            raise HTTPException(status_code=400, detail="topk 必须大于 0")
-
-        topk = request.topk if request.topk is not None else len(request.documents)
-        topk = min(topk, len(request.documents))
-
-        instruction = request.instruction
-        instruction_source = "body.instruction"
-        if request.extra_body and request.extra_body.get("instruction"):
-            instruction = request.extra_body["instruction"]
-            instruction_source = "body.extra_body.instruction"
-
-        logger.info(
-            "收到 /rerank 请求: query=%s, documents_count=%d, topk=%d, max_length=%d, instruction_source=%s, instruction=%s, document_preview=%s",
-            _truncate_text(request.query),
-            len(request.documents),
-            topk,
-            request.max_length,
-            instruction_source,
-            _truncate_text(instruction),
-            [_truncate_text(doc, 120) for doc in request.documents[:3]],
-        )
-
-        # 即时根据该请求的 instruction 处理，不与其他请求合并
-        pairs = [(request.query, doc) for doc in request.documents]
-        logger.info("pairs=%s", pairs)
-        inputs = process_inputs(
-            pairs,
-            instruction,
-            request.max_length - len(suffix_tokens),
-            suffix_tokens
-        )
-        logger.info("inputs=%s", inputs)
-        scores = await compute_logits_batch(engine, inputs, sampling_params, true_token, false_token)
-        logger.info("scores=%s", scores)
-        # 携带原始索引并排序
-        scored_with_index = [
-            (idx, doc, score) for idx, (doc, score) in enumerate(zip(request.documents, scores))
-        ]
-        scored_with_index.sort(key=lambda x: x[2], reverse=True)
-        rerank_data = [
-            RerankDataItem(
-                index=idx,
-                relevance_score=score,
-                document=doc,
-            )
-            for idx, doc, score in scored_with_index[:topk]
-        ]
-
-        return RerankResponse(
-            id=f"rnk-{uuid.uuid4().hex[:20]}",
-            object="list",
-            data=rerank_data,
-            usage=RerankUsage(total_tokens=0),
-        )
-
+        return await _do_rerank(request)
     except HTTPException:
         raise
-
     except Exception as e:
         logger.error(f"重排序过程中发生错误: {str(e)}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"内部服务器错误: {str(e)}")
 
 
